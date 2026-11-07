@@ -22,6 +22,7 @@ venv/
 # Build and runtime outputs
 build/
 dist/
+site/
 runs/
 logs/
 wandb/
@@ -42,6 +43,24 @@ docs/agents/*
 !docs/rollout-runtime-lifecycle.md
 !docs/train-inference-consistency.md
 !docs/web-console.md
+!docs/index.md
+!docs/requirements.txt
+!docs/stylesheets/
+!docs/stylesheets/extra.css
+!docs/assets/
+!docs/assets/HarborRL-title.jpg
+!docs/getting-started/
+!docs/getting-started/*.md
+!docs/math/
+!docs/math/*.md
+!docs/training/
+!docs/training/*.md
+!docs/deployment/
+!docs/deployment/*.md
+!docs/tutorials/
+!docs/tutorials/*.md
+!docs/reference/
+!docs/reference/*.md
 practices/**/VALIDATION.md
 practices/**/HISTORICAL_VALIDATION.md
 integration-report-*.md

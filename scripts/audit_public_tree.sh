@@ -21,6 +21,18 @@ public_documents = {
     "docs/agents/environment-check.md", "docs/configuration-wizard.md",
     "docs/deployment.md", "docs/rollout-runtime-lifecycle.md", "docs/sandbox-rollout.md",
     "docs/train-inference-consistency.md", "docs/web-console.md",
+    "docs/index.md", "docs/requirements.txt",
+    "docs/getting-started/index.md", "docs/getting-started/installation.md",
+    "docs/getting-started/quickstart.md",
+    "docs/math/index.md", "docs/math/models.md", "docs/math/algorithms.md",
+    "docs/math/tasks.md", "docs/math/harnesses.md", "docs/math/compatibility.md",
+    "docs/training/index.md", "docs/training/configuration.md", "docs/training/native.md",
+    "docs/deployment/embedded.md", "docs/deployment/service.md", "docs/deployment/h-cluster.md",
+    "docs/tutorials/hello-world.md", "docs/tutorials/harbor-task.md",
+    "docs/tutorials/native-dry-run.md", "docs/tutorials/service-deployment.md",
+    "docs/reference/cli.md", "docs/reference/training-schema.md",
+    "docs/reference/deployment-schema.md", "docs/reference/python.md",
+    "docs/reference/artifacts.md",
     "practices/h_cluster/README.md", "harborrl/webui/static/lucide-LICENSE.txt",
 }
 

@@ -33,12 +33,19 @@
 
 HarborRL is a lightweight framework for training tool-using agents on verifiable, sandboxed tasks. It makes model serving, trajectory generation, tool execution, verifier rewards, and policy updates into a single reproducible pipeline.
 
-HarborRL supports flexible combinations of **Models × Algorithms × Tasks × Harnesses (MATH)**:
+HarborRL validates explicit combinations of **Models × Algorithms × Tasks × Harnesses (MATH)**.
+The current implementation registers:
 
-- **Models:** RL training using Qwen and GLM as base models.
-- **Algorithms:** GRPO and DAPO for RL training.
-- **Tasks:** RL training on **200+** Harbor-format tasks in isolated workers, including Terminal-Bench, SWE-Bench, Deep-SWE, and more.
-- **Harnesses:** RL training with **40+** harness frameworks, including Claude Code, Codex, LangGraph, SWE-agent, and more.
+- **Model:** Qwen presets served by SGLang.
+- **Algorithm:** GRPO through the pinned Slime v0.3.2 native contract.
+- **Tasks:** native Harbor task locks in JSON or JSONL catalogs.
+- **Harness:** Claude Code through Harbor 0.23.0.
+
+Run `harborrl list models`, `algorithms`, `tasks`, or `harnesses` to query the
+installed registry. Dataset compatibility evidence is scoped separately and does
+not imply that a task collection ships with HarborRL or has completed RL training.
+See the [documentation site](https://datamllab.github.io/HarborRL/) for the exact
+support matrix, tutorials, deployment guides, and API reference.
 
 ## AI-assisted Configure
 
@@ -73,7 +80,8 @@ First run read-only checks only. Return the required structured report and tell
 me the smallest next command that fixes one blocker. Do not install, download,
 pull an image, mount storage, or start a service without my explicit consent.
 After each approved change, rerun the relevant checks. Finish with harborrl
-doctor and launch_native --dry-run for a native deployment.
+doctor and harborrl train --dry-run for a native deployment, passing the explicit
+deployment file when one is used.
 ```
 
 Confirm the result yourself against this checklist:
@@ -84,8 +92,9 @@ Confirm the result yourself against this checklist:
 2. For CPU development, `uv run harborrl --help` and `uv run pytest` both pass.
 3. For native deployment, every statically verifiable rollout-worker, GPU, and
    cross-machine check is `ready`; `harborrl doctor` has no failed checks; and
-   `uv run harborrl train <Path to config.yaml> --dry-run` resolves the launch
-   plan.
+   `uv run harborrl train <Path to config.yaml> --deployment <Path to deployment.yaml>
+   --dry-run` resolves the launch plan (omit `--deployment` only for an intentional
+   embedded/default deployment).
 4. Every `unknown` item names what is deferred and why. Live gateway and
    task-image checks can legitimately remain deferred before training.
 5. The agent waits for explicit consent before starting real training.
@@ -117,7 +126,9 @@ uv run harborrl --help
 uv run pytest
 ```
 
-Expected result: uv executes the installed entry point and tests without activating the virtual environment manually. `train` accepts command composition or a YAML file; `doctor` validates a YAML deployment.
+Expected result: uv executes the installed entry point and tests without activating
+the virtual environment manually. `train` loads a YAML file and can overlay explicit
+MATH selectors; `doctor` validates the configured environment and deployment.
 
 For native training, install the pinned backend stack in a writable location:
 
@@ -133,23 +144,32 @@ for cleanup markers and CPU-only regression checks.
 
 ### Train
 
-After installation, choose one of the two configuration styles:
+Start with the bundled side-effect-free dry run:
 
 ```bash
-# Compose the four experiment dimensions.
-uv run harborrl train -model qwen3-8B -harness claude-code -task terminal-bench -alg grpo
+uv run harborrl train examples/native/train_qwen_native.yaml \
+  --deployment examples/native/deployment-embedded.yaml --dry-run
 
-# Load a complete, reproducible experiment definition.
-uv run harborrl train <Path to config.yaml>
+# Overlay registered selectors on an existing configuration and locked task ID.
+uv run harborrl train --config examples/native/train_qwen_native.yaml \
+  --deployment examples/native/deployment-embedded.yaml \
+  -model qwen3-8B -harness claude-code -task hello_world -alg grpo --dry-run
 ```
 
-For a bootstrap-aware YAML launch, use:
+For a prepared site configuration, pass both files explicitly:
 
 ```bash
-bash scripts/launch_native.sh --config <Path to config.yaml> --backends <Path to HarborRL backends>
+uv run harborrl train <Path to config.yaml> \
+  --deployment <Path to deployment.yaml>
 ```
 
-The command style is a shorthand over `config.yaml` in the working directory (or the file selected with `--config`) and selects the four experiment dimensions. The YAML style is the complete launch definition: it also pins checkpoints, workers, serving settings, GPU topology, sampling limits, and output locations. Start from [examples/native/train_qwen_native.yaml](examples/native/train_qwen_native.yaml) and keep site-specific files outside the repository.
+Dimension flags overlay `config.yaml` in the working directory (or the file selected
+with `--config`); they do not construct a configuration from scratch. The YAML file
+pins checkpoints, workers, serving settings, GPU topology, sampling limits, and output
+locations. Start from [examples/native/train_qwen_native.yaml](examples/native/train_qwen_native.yaml)
+and keep site-specific files outside the repository. `scripts/launch_native.sh` is a
+bootstrap convenience for embedded/default discovery; it has no explicit
+`--deployment` option.
 
 ## Task Configuration
 

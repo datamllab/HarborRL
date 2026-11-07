@@ -53,7 +53,7 @@ or export answers from the editor. Advanced remote Sandbox runners can be
 specified through imported answers; the form preset defaults to a local runner.
 
 H-cluster deployments remain the optional
-[H practice](../practices/h_cluster/README.md). Prepare its Sandbox configuration
+[H practice](deployment/h-cluster.md). Prepare its Sandbox configuration
 separately and reference the path. H project/environment identifiers and relay
 settings are not part of the core web form.
 

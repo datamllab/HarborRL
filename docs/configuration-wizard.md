@@ -72,11 +72,11 @@ compatibility is additionally checked by the existing training dry-run.
    Copy `path` and `task_digest` from a `NEEDS_PROBE` inspection record, assign a
    unique stable `id`, retain the pinned revision, and explicitly set the verifier's
    reward contract (for example `reward_profile: {key: reward}`). See
-   [the catalog example](../examples/native/catalog.jsonl). `INVALID` and
+   [the catalog example](https://github.com/datamllab/HarborRL/blob/main/examples/native/catalog.jsonl). `INVALID` and
    `UNSUPPORTED` inspection results cannot be made trainable by changing labels.
    Do not replace computed digests with placeholder values.
 2. Prepare a pinned Claude Code profile. See
-   [the native examples](../examples/native) for profile structure. It must match
+   [the native examples](https://github.com/datamllab/HarborRL/tree/main/examples/native) for profile structure. It must match
    the agent and task requirements of your deployment.
 3. Stage checkpoint and reference directories on the GPU target. The wizard
    calculates both tokenizer fingerprints automatically, using that target's
@@ -89,7 +89,7 @@ compatibility is additionally checked by the existing training dry-run.
    and shared storage. Service origins must include their declared ports and be
    reachable by the participating machines.
 5. For Sandbox, prepare the existing platform configuration and image bindings.
-   H-cluster users follow [the optional H practice](../practices/h_cluster/README.md)
+   H-cluster users follow [the optional H practice](deployment/h-cluster.md)
    and reference its site file. The core CLI never asks for H project/environment
    identifiers or embeds private endpoints or credentials.
 
@@ -131,11 +131,11 @@ to store incomplete answers without running preparation or final validation.
 Start from one of these reference answer templates and replace example paths
 before running:
 
-- [embedded-local](../examples/options/embedded-local.answers.yaml): one machine,
+- [embedded-local](https://github.com/datamllab/HarborRL/blob/main/examples/options/embedded-local.answers.yaml): one machine,
   local Harbor runner, colocated training/serving by default.
-- [service-ssh](../examples/options/service-ssh.answers.yaml): controller, SSH GPU
+- [service-ssh](https://github.com/datamllab/HarborRL/blob/main/examples/options/service-ssh.answers.yaml): controller, SSH GPU
   target and explicit SSH Docker workers.
-- [service-sandbox-local-runner](../examples/options/service-sandbox.answers.yaml):
+- [service-sandbox-local-runner](https://github.com/datamllab/HarborRL/blob/main/examples/options/service-sandbox.answers.yaml):
   controller and runner here, SSH GPU target, Sandbox task execution.
 
 Templates leave fingerprints empty for automatic preparation. Web also offers

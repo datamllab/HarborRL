@@ -68,5 +68,5 @@ is a live allocation test and consumes platform resources. A successful CPU
 test or dependency probe does not establish live training acceptance.
 
 For Brainbox and developer-mediated networking, see the independently
-installable [H-cluster practice](../practices/h_cluster/README.md). H-specific
+installable [H-cluster practice](deployment/h-cluster.md). H-specific
 configuration from the experimental branch must be migrated as described there.

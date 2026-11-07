@@ -131,7 +131,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="harborrl hello", description=__doc__)
     parser.add_argument("--out-dir", default=None, help="New artifact directory; defaults to ./harborrl-hello-<timestamp>")
     args = parser.parse_args(argv)
-    root = args.out_dir or "harborrl-hello-" + datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    root = args.out_dir or (
+        "harborrl-hello-" + datetime.now().strftime("%Y%m%d-%H%M%S-%f")  # noqa: DTZ005
+    )
     try:
         run(root)
         return 0

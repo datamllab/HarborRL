@@ -91,7 +91,7 @@ items that block diagnosis:
   an actual training run.
 - Whether rollout workers and GPU training are on one machine or different
   machines.
-- The YAML config path, when one exists.
+- The training YAML path and deployment YAML path, when they exist.
 - SSH host aliases and the absolute HarborRL checkout path on each rollout
    worker.
 - The absolute paths of the model actor/reference checkpoints and the output
@@ -275,10 +275,14 @@ After the CPU environment exists and a YAML config is available, run from the
 controller:
 
 ```bash
-uv run harborrl doctor --config path/to/config.yaml
+uv run harborrl doctor --config path/to/config.yaml \
+  --deployment path/to/deployment.yaml
 ```
 
-Alternatively, use the native launcher wrapper:
+Omit `--deployment` only when the target intentionally uses the implicit
+embedded/default topology. The native launcher wrapper has no `--deployment` option
+and changes to the repository root, so use it only when that discovery behavior is
+intended:
 
 ```bash
 bash scripts/launch_native.sh --config path/to/config.yaml --doctor
@@ -288,7 +292,8 @@ For `deployment_preflight` acceptance, also run the safe launcher dry run and
 retain its resolved plan as evidence:
 
 ```bash
-uv run harborrl train path/to/config.yaml --dry-run
+uv run harborrl train path/to/config.yaml \
+  --deployment path/to/deployment.yaml --dry-run
 ```
 
 Requirements:

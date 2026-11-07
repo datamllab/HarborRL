@@ -1,0 +1,126 @@
+site_name: HarborRL
+site_url: https://datamllab.github.io/HarborRL/
+site_description: Auditable agentic reinforcement learning on verifiable Harbor tasks
+site_author: The HarborRL contributors
+
+repo_name: datamllab/HarborRL
+repo_url: https://github.com/datamllab/HarborRL
+edit_uri: edit/main/docs/
+
+copyright: Copyright &copy; 2026 The HarborRL contributors
+
+theme:
+  name: material
+  language: en
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: cyan
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: cyan
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.action.edit
+    - content.code.copy
+    - content.code.annotate
+    - content.tooltips
+    - search.highlight
+    - search.share
+    - search.suggest
+  icon:
+    repo: fontawesome/brands/github
+
+extra_css:
+  - stylesheets/extra.css
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [.]
+          options:
+            docstring_style: google
+            heading_level: 2
+            members_order: source
+            separate_signature: true
+            show_root_heading: true
+            show_signature_annotations: true
+            signature_crossrefs: true
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Overview: getting-started/index.md
+      - Installation: getting-started/installation.md
+      - Quick start: getting-started/quickstart.md
+      - Configuration CLI: configuration-wizard.md
+      - Web console: web-console.md
+  - MATH Components:
+      - Overview: math/index.md
+      - Models: math/models.md
+      - Algorithms: math/algorithms.md
+      - Tasks: math/tasks.md
+      - Harnesses: math/harnesses.md
+      - Compatibility: math/compatibility.md
+  - Training:
+      - Overview: training/index.md
+      - Configuration: training/configuration.md
+      - Native training: training/native.md
+      - Train / inference consistency: train-inference-consistency.md
+      - Runtime lifecycle and recovery: rollout-runtime-lifecycle.md
+  - Deployment:
+      - Overview and topologies: deployment.md
+      - Embedded / local: deployment/embedded.md
+      - Controller and SSH: deployment/service.md
+      - OpenSandbox: sandbox-rollout.md
+      - H-cluster practice: deployment/h-cluster.md
+      - Environment verification: agents/environment-check.md
+  - Tutorials:
+      - CPU Hello World: tutorials/hello-world.md
+      - Inspect and lock a Harbor task: tutorials/harbor-task.md
+      - Native training dry run: tutorials/native-dry-run.md
+      - Service deployment dry run: tutorials/service-deployment.md
+  - API Reference:
+      - CLI: reference/cli.md
+      - Training schema: reference/training-schema.md
+      - Deployment schema: reference/deployment-schema.md
+      - Python API: reference/python.md
+      - Run artifacts: reference/artifacts.md

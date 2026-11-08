@@ -1,0 +1,102 @@
+:root {
+  --md-primary-fg-color: #075985;
+  --md-primary-fg-color--light: #0e7490;
+  --md-primary-fg-color--dark: #0c4a6e;
+  --harbor-accent: #06b6d4;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #082f49;
+  --md-typeset-a-color: #67e8f9;
+}
+
+.md-header {
+  background: linear-gradient(110deg, #082f49 0%, #075985 55%, #0e7490 100%);
+}
+
+.harbor-hero {
+  display: grid;
+  gap: 1.75rem;
+  align-items: center;
+  margin: 0 0 2rem;
+  padding: 2rem;
+  overflow: hidden;
+  color: #f8fafc;
+  background:
+    radial-gradient(circle at 92% 10%, rgb(34 211 238 / 28%), transparent 32%),
+    linear-gradient(135deg, #082f49 0%, #0c4a6e 52%, #155e75 100%);
+  border: 1px solid rgb(103 232 249 / 22%);
+  border-radius: 1rem;
+  box-shadow: 0 1rem 3rem rgb(8 47 73 / 18%);
+}
+
+.harbor-hero img {
+  width: min(100%, 46rem);
+  margin: 0 auto;
+  border-radius: 0.4rem;
+}
+
+.harbor-hero h1 {
+  margin: 0;
+  color: #fff;
+  font-weight: 750;
+  letter-spacing: -0.025em;
+}
+
+.harbor-hero p {
+  max-width: 52rem;
+  margin-bottom: 0;
+  color: #dbeafe;
+  font-size: 1.08rem;
+}
+
+.harbor-hero .md-button {
+  color: #fff;
+  border-color: #67e8f9;
+}
+
+.harbor-hero .md-button:hover,
+.harbor-hero .md-button:focus {
+  color: #082f49;
+  background-color: #a5f3fc;
+  border-color: #a5f3fc;
+}
+
+.harbor-hero .md-button--primary {
+  color: #fff;
+  background-color: #0891b2;
+  border-color: #22d3ee;
+}
+
+.harbor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+
+.harbor-card {
+  padding: 1.1rem 1.2rem;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 0.65rem;
+  background: var(--md-default-bg-color);
+}
+
+.harbor-card > :first-child {
+  margin-top: 0;
+}
+
+.harbor-card > :last-child {
+  margin-bottom: 0;
+}
+
+.support-table td:first-child {
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+@media screen and (max-width: 44.984375em) {
+  .harbor-hero {
+    padding: 1.35rem;
+  }
+}

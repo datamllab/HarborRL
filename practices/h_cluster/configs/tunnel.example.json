@@ -1,0 +1,15 @@
+{
+  "_comment": "Replace every placeholder. Run `python -m harborrl_h_cluster.tunnel install --config this-file` and paste the printed line into the outside host's interactive portal session once.",
+  "hub": "REPLACE-user@REPLACE-manager-host",
+  "identity": "/REPLACE/path/to/outside_host_id_ed25519",
+  "state_path": "/REPLACE/path/tunnel-state.json",
+  "mappings": [
+    { "local_port": 5010, "hub_bind": "127.0.0.1", "hub_port": 15010 },
+    { "local_port": 5011, "hub_bind": "127.0.0.1", "hub_port": 15011 }
+  ],
+  "push": [
+    "/REPLACE/local/traces:REPLACE/remote/incoming/traces"
+  ],
+  "backoff_start": 1.0,
+  "backoff_cap": 60.0
+}

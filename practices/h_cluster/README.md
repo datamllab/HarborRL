@@ -78,6 +78,61 @@ both before reusing capacity. Never delete templates or instances belonging to
 other runs. The framework records unresolved cleanup rather than assuming it
 succeeded. It does not automatically replace platform Environment templates.
 
+## GPU jobs and outside hosts
+
+Two optional adapters cover machines the core deliberately does not know
+about. Both are site adapters; the core only pins their contracts.
+
+**Provisioned GPU jobs.** A deployment may declare `gpu_target.provision`
+instead of a fixed `gpu_target.ssh`:
+
+```yaml
+gpu_target:
+  id: trainer
+  transport: ssh
+  ssh: null
+  provision:
+    up: ["python", "-m", "harborrl_h_cluster.rjob", "up", "--config", "/srv/harborrl/site/rjob.json"]
+    down: ["python", "-m", "harborrl_h_cluster.rjob", "down", "--config", "/srv/harborrl/site/rjob.json"]
+```
+
+The core runs `up` before anything dials the machine, reruns the deferred GPU
+probes against the machine it obtained, and runs `down` in its `finally` path —
+a failed launch, a cancelled wait or a crashed run all still release it. `up`
+prints the machine record as its last stdout line: `host`, optional `user`,
+`port`, `identity` and an opaque `handle`; any other key is rejected. `down`
+receives the same record on stdin. Nothing secret belongs in either direction.
+
+`rjob up` refuses to submit while a previous pod record exists under its
+`workdir`: a second submit silently spends a second allocation. Release test
+pods with `down`; the release outcome is published even when it fails, so a
+leaked pod is visible instead of assumed clean.
+
+**A host the cluster cannot dial.** When a machine has no inbound route but can
+reach the hub, it serves shard ports through reverse forwards:
+
+```bash
+python -m harborrl_h_cluster.tunnel install --config /srv/harborrl/site/tunnel.json
+```
+
+It prints two commands as JSON, because one paste cannot do both ends: the
+host's key is not authorized yet, so it cannot reach the hub until the hub
+side runs. Run `hub` on the hub (it authorizes the public key, idempotently),
+then run `host` in the outside host's interactive session (it pulls the
+package over the same one-way path, writes the site config, and starts the
+supervised daemon). Both are idempotent and carry no private key material.
+
+The network portal swallows non-interactive input, so that paste is the only
+installation channel; the platform may wipe the host's `/root` and take the
+installed key with it, in which case the daemon's state file names the failure
+and the pair must be run again. Declare the shard in
+`manager.gateway_shards` pointing at the hub's `127.0.0.1:<hub_port>`, and keep
+`gateway_hosts` for elastic growth; the two may coexist.
+
+Such a host has no shared storage. `push` copies declared directories back to
+the hub over the same ssh direction with bounded retries, and never exposes a
+partially written tree.
+
 ## Configuration migration
 
 Experimental flat Brainbox configs are intentionally not accepted as standard

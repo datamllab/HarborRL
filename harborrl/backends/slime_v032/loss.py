@@ -6,9 +6,9 @@ import math
 from harborrl.export.validate import token_weight
 from harborrl.trajectories.native import finite
 
-# Slime v0.3.2 rescales custom loss by microbatch, step rollout count, and DP
-# size outside this hook. Keep the correction explicit while GPU acceptance
-# determines whether the official scaling already preserves Native semantics.
+# The pinned Slime scheduler counts distinct rollout ids, one per group.
+# Its outer microbatch/DP scaling therefore averages these group-weighted
+# sums over groups, with no additional group-size correction.
 LOSS_SCALE_CORRECTION = 1.0
 
 
@@ -40,7 +40,7 @@ def clipped_pg_loss_pure(new_logprobs, old_logprobs, advantages, weights, epsilo
     return total
 
 
-def clipped_loss(new_logprobs, old_logprobs, advantages, weights, epsilon=0.2, loss_masks=None):
+def clipped_loss(new_logprobs, old_logprobs, advantages, weights, epsilon=0.2, loss_masks=None, epsilon_high=None):
     """Global sum of weighted PPO losses; usable on CPU for gradient contracts."""
     import torch
     if not (new_logprobs.shape == old_logprobs.shape == advantages.shape == weights.shape):
@@ -49,10 +49,13 @@ def clipped_loss(new_logprobs, old_logprobs, advantages, weights, epsilon=0.2, l
         raise ValueError("native loss mask must match token weights")
     if not 0 < epsilon < float("inf"):
         raise ValueError("native clipping epsilon must be finite and positive")
+    epsilon_high = epsilon if epsilon_high is None else epsilon_high
+    if not 0 < epsilon_high < float('inf'):
+        raise ValueError('native upper clipping epsilon must be finite and positive')
     if any(not torch.isfinite(tensor).all() for tensor in (new_logprobs, old_logprobs, advantages, weights)) or (weights < 0).any():
         raise ValueError("nonfinite native loss input or negative weight")
     ratio = (new_logprobs - old_logprobs).exp()
-    loss = torch.maximum(-advantages * ratio, -advantages * ratio.clamp(1 - epsilon, 1 + epsilon))
+    loss = torch.maximum(-advantages * ratio, -advantages * ratio.clamp(1 - epsilon, 1 + epsilon_high))
     if loss_masks is not None:
         weights = weights * loss_masks.to(device=weights.device, dtype=weights.dtype)
     return (loss * weights).sum()

@@ -9,11 +9,20 @@ The three policies are the observed behavior `q`, frozen pre-update trainer
 drift is `log pθ - log p0`. The Native loss remains unchanged. No TIS, clipping
 correction, or new training objective is introduced.
 
+## Service sampling lock
+
+The service client computes the sampling digest from the original group request,
+normalizing equivalent JSON probabilities (`1` and `1.0`) the same way as the
+executor and Gateway. Each slot descriptor and trajectory identity must match
+that requested digest. Native readiness validation then binds every turn's
+sampling evidence to the trajectory identity. Internally consistent manifests
+from a different distribution are rejected before conversion to training samples.
+
 ## Configuration
 
-Native schema 2 accepts an optional `consistency` mapping. Its default mode is
-`off`. Existing configurations remain valid. `audit` records numerical violations;
-`enforce` rejects violations before
+Both Native schema 2 and the Transformers math configuration accept an optional
+`consistency` mapping. Its default mode is `off`. Existing configurations remain
+valid. `audit` records numerical violations; `enforce` rejects violations before
 training or serving admission. Invalid evidence always rejects, including in
 audit mode. Enforce requires an explicit `max_abs_delta`. Calibrate tolerances
 for the actual model, precision, parallel layout and kernels.
@@ -62,11 +71,28 @@ fraction, bounded worst positions and histogram percentile **upper bounds**.
 They do not copy raw prompt or response text. TP duplicate counts are excluded.
 Distributed validation collects rank errors before all ranks reject.
 
+## Serving text and token evidence
+
+The text passed to the model-output parser must equal the complete visible
+decoding of the generation token IDs. Prefix agreement and whitespace
+normalization do not prove that the responses match. The only accepted omission
+is an exact terminal stop string declared by the request and explicitly reported
+as matched by SGLang's stop finish reason. Extra text before or after that stop
+is rejected. The original generation IDs and logprobs remain unchanged.
+
+## Transformers mathematical reference
+
+The optional gate teacher-forces the frozen batch under `no_grad` before any
+backward call and uses the same metrics and report format. The pre-existing
+`training.behavior_tolerance` check remains active; audit does not loosen it.
+Fake teacher scores never stand in for observed student behavior.
+
 ## Validation and limitations
 
 Run `pytest -q tests/test_consistency.py` for the dependency-free checks. With
-Torch installed, run `pytest -q tests/test_consistency_torch.py` for two-rank
-failure propagation. These tests do not run a separate training loop.
+Torch and Transformers installed, run `pytest -q tests/test_consistency_torch.py
+tests/harborrl/test_distill.py` for real optimizer rejection, parameter changes,
+two-rank failure propagation and the math pipeline tests.
 
 GPU acceptance must additionally exercise the locked Megatron / SGLang versions
 on the target hardware: initial sync, actual rollout tokens, optimizer update,

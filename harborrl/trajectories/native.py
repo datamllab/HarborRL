@@ -167,6 +167,10 @@ def validate_turn(turn, identity, trial_id):
     for key in ("client_request", "serving_input", "response"):
         if key not in turn or turn.get(key + "_digest") != digest(turn[key]):
             errors.append(key + "_digest")
+    declared = {tool['name'] for tool in turn.get('client_request', {}).get('tools', [])}
+    if any(block.get('type') == 'tool_use' and block.get('name') not in declared
+           for block in turn.get('response', {}).get('content', [])) and not turn.get('tool_rejection_ref'):
+        errors.append('unconfirmed_tool_rejection')
     if turn.get("finish_reason") not in ("end_turn", "tool_use", "max_tokens", "stop_sequence"):
         errors.append("finish_reason")
     return errors
@@ -210,8 +214,14 @@ def validate_v2(ir):
             errors.append("mixed_tokenizer_template")
         if ir.get("termination") not in ("completed", "budget_truncated"):
             errors.append("termination")
-        if ir.get("termination") == "budget_truncated" and not ir.get("termination_evidence"):
-            errors.append("truncation_evidence")
+        if ir.get("termination") == "budget_truncated":
+            evidence = ir.get('termination_evidence')
+            if (not isinstance(evidence, dict) or evidence != receipt.get('termination_evidence')
+                    or evidence.get('source_result_digest') != receipt.get('source_result_digest')
+                    or evidence.get('consumed_response_ids') != [t['response_id'] for t in turns]):
+                errors.append("truncation_evidence")
+        elif ir.get('termination_evidence') is not None or receipt.get('termination_evidence') is not None:
+            errors.append('unexpected_termination_evidence')
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
         errors.append(f"malformed_contract:{type(exc).__name__}")
     return sorted(set(errors))

@@ -18,22 +18,22 @@ def http_json(url, payload=None, timeout=120):
         return json.load(response)
 
 
-def score(endpoint, prompt, response, version, *, transport=http_json):
+def score(endpoint, prompt, response, version, *, transport=http_json, label="Canary"):
     tokens = prompt + response
     payload = {"input_ids": tokens, "sampling_params": {"temperature": 1.0, "top_p": 1.0,
                "top_k": -1, "max_new_tokens": 0}, "return_logprob": True, "logprob_start_len": 0}
     output = transport(endpoint.rstrip("/") + "/generate", payload)
     meta = output.get("meta_info", {})
     if str(meta.get("weight_version", "")) != str(version):
-        raise ValueError("Canary generation-time weight version mismatch")
+        raise ValueError(f"{label} generation-time weight version mismatch")
     rows = meta.get("input_token_logprobs")
     if (not isinstance(rows, list) or len(rows) != len(tokens)
             or any(not isinstance(row, (tuple, list)) or len(row) < 2 for row in rows)
             or [row[1] for row in rows] != tokens):
-        raise ValueError("Canary input logprobs must preserve every exact token and position")
+        raise ValueError(f"{label} input logprobs must preserve every exact token and position")
     values = [row[0] for row in rows[len(prompt):]]
     if any(not finite(value) or value > 0 for value in values):
-        raise ValueError("Invalid canary raw logprob")
+        raise ValueError(f"Invalid {label} raw logprob")
     return values
 
 

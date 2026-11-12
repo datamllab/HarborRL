@@ -13,7 +13,12 @@ from pathlib import Path
 from urllib import error, parse, request
 
 from harborrl.rollout.runtime import task_entry
-from harborrl.trajectories.native import digest, read_json, require_ready
+from harborrl.trajectories.native import (
+    canonical_sampling,
+    digest,
+    read_json,
+    require_ready,
+)
 
 SERVICE_SCHEMA = "harborrl-rollout-service-v1"
 
@@ -185,8 +190,11 @@ def load_group_result(run_id, group_request, result, *, allow_synthetic=False):
     if (not isinstance(slots, list) or len(slots) != len(expected) or len(slots) < 2
             or [slot.get("slot_id") for slot in slots] != expected):
         raise ServiceRolloutError("group result is incomplete or reordered")
+    sampling_sha = digest(canonical_sampling(group_request["sampling"]))
     trajectories = []
     for descriptor, slot in zip(group_request["slots"], slots):
+        if slot.get("sampling_digest") != sampling_sha:
+            raise ServiceRolloutError(f"slot {descriptor['slot_id']} sampling digest differs from the request")
         path = Path(slot["manifest_path"])
         try:
             payload = read_json(path)
@@ -195,6 +203,8 @@ def load_group_result(run_id, group_request, result, *, allow_synthetic=False):
         if digest(payload) != slot.get("manifest_sha256"):
             raise ServiceRolloutError(f"slot {descriptor['slot_id']} manifest digest mismatch")
         identity = payload.get("identity", {})
+        if identity.get("sampling_digest") != sampling_sha:
+            raise ServiceRolloutError(f"slot {descriptor['slot_id']} manifest sampling differs from the request")
         if (identity.get("policy_version") != group_request["policy_version"]
                 or identity.get("task_digest") != group_request["task"]["task_digest"]
                 or identity.get("run_id") != run_id

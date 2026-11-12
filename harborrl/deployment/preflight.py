@@ -104,11 +104,25 @@ def _local_runner():
     return run, test
 
 
-def _gpu_checks(plan, deployment):
+def gpu_checks(plan, deployment):
+    """Probes that need a live GPU machine; the dispatcher reruns them.
+
+    Plan-time preflight cannot probe a machine that provisioning has not
+    created yet, so it defers; the dispatcher calls this again once ``up``
+    has produced one, before anything is launched.
+    """
     gpu, connectivity = deployment["gpu_target"], deployment["connectivity"]
     config = plan["config"]
     machine = gpu["id"]
     checks = []
+    if gpu["transport"] == "ssh" and gpu.get("ssh") is None:
+        # A provisioned target has no machine until the dispatch obtains one:
+        # probing here would test nothing, and a green check would be a lie.
+        checks.append(_check(
+            "gpu_target", machine, "gpu_target.provision", True,
+            "deferred: gpu_target.provision obtains the machine at dispatch, "
+            "which then reruns these checks before launching"))
+        return checks
     if gpu["transport"] == "ssh":
         spec = gpu["ssh"]
         started = time.monotonic()
@@ -297,7 +311,7 @@ def preflight(plan, deployment, *, live=True):
                        True, "dry-run: parsed and validated, remote probes skipped")]
     checks = []
     checks.extend(_manager_checks(deployment))
-    checks.extend(_gpu_checks(plan, deployment))
+    checks.extend(gpu_checks(plan, deployment))
     if deployment["rollout"]["provider"] == "ssh_docker":
         checks.extend(_worker_checks(plan, deployment))
     checks.extend(_control_loop_checks(deployment))

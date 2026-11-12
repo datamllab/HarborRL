@@ -17,6 +17,10 @@ def main(argv=None):
         from harborrl.webui.cli import main as web_main
 
         return web_main(argv[1:])
+    if argv and argv[0] == "distill":
+        from harborrl.distill.cli import main as distill_main
+
+        return distill_main(argv[1:])
     if argv and argv[0] in {"options", "validate", "init"}:
         from harborrl.options.cli import main as options_main
 

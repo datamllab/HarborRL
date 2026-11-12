@@ -9,8 +9,8 @@ from harborrl.rollout.harbor_job.sandbox_transport import (
 
 
 class SandboxStartupTransport(AllocationTransport):
-    def __init__(self, base_url, on_created, *, timeout, transport=None, retry_delay=2):
-        super().__init__(base_url, on_created, transport=transport)
+    def __init__(self, base_url, on_created, *, timeout, transport=None, retry_delay=2, on_request=None):
+        super().__init__(base_url, on_created, transport=transport, on_request=on_request)
         self.deadline = time.monotonic() + timeout
         self.retry_delay = retry_delay
 

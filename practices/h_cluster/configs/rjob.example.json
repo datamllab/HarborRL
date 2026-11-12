@@ -1,0 +1,23 @@
+{
+  "_comment": "Replace every placeholder. Referenced by gpu_target.provision.up/down in a deployment config. No credential belongs in this file.",
+  "name_prefix": "harborrl-train",
+  "namespace": "REPLACE-project-namespace",
+  "charged_group": "REPLACE-charged-group",
+  "private_machine": "group",
+  "image": "REPLACE-registry/image:tag",
+  "image_pull_policy": "IfNotPresent",
+  "mounts": [
+    "REPLACE-storage-scheme://REPLACE-volume/REPLACE-export:REPLACE-mount-point"
+  ],
+  "gpu": 4,
+  "cpu": 64,
+  "memory": 400000,
+  "priority": 1,
+  "workdir": "/REPLACE/shared/path/for/this/run",
+  "identity": "/REPLACE/path/to/manager_id_ed25519",
+  "ssh_user": "root",
+  "ssh_port": 22,
+  "timeout_s": 1800,
+  "poll_interval_s": 15,
+  "alive_seconds": 21600
+}

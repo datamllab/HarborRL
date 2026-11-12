@@ -43,8 +43,10 @@ def dispatch(plan, *, doctor_only=False):
         explicit = plan.get("deployment", {}).get("source", "embedded-local") != "embedded-local"
         print(json.dumps({"checks": checks,
                           "scope": ("deployment topology, " if explicit else "")
-                          + "native config, original tasks, isolated Harbor, training "
-                            "dependencies and GPU budget; protocol/token semantics "
+                          + ("math config, locked tasks, training " if
+                             plan['config']['execution']['backend'] == 'text_math' else
+                             "native config, original tasks, isolated Harbor, training ")
+                          + "dependencies and GPU budget; protocol/token semantics "
                             "require the deferred live probe"},
                          indent=2))
         return int(any(not check["ok"] for check in checks))

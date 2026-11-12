@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import os
 
 REQUIRED_FIELDS = (
     "tokens",
@@ -46,9 +47,28 @@ def _validate_rollout_data(args, rollout_id, rollout_data):
         raise ValueError("native rollout data fields have mismatched sample counts")
     if count < 1:
         raise ValueError("native rollout data is empty")
+    teacher = rollout_data.get('teacher_log_probs')
+    algorithm = os.environ.get('HARBORRL_MATH_ALGORITHM', 'grpo')
+    if algorithm == 'opd':
+        if teacher is None or len(teacher) != count:
+            raise ValueError('OPD requires teacher scores for every sample')
+    elif teacher is not None:
+        raise ValueError('GRPO must not consume teacher scores')
     group_size = int(getattr(args, "n_samples_per_prompt", 0))
     if group_size < 2:
         raise ValueError("native training requires a complete group")
+    if os.environ.get('HARBORRL_PROCESS_REWARD'):
+        import torch
+        if algorithm != 'grpo' or teacher is not None:
+            raise ValueError('PRM requires GRPO without teacher scores')
+        for field in ('advantages', 'returns'):
+            values = rollout_data.get(field)
+            if values is None or len(values) != count:
+                raise ValueError('PRM requires computed token advantages and returns')
+            for index, value in enumerate(values):
+                if (value.ndim != 1 or value.numel() != rollout_data['response_lengths'][index]
+                        or not torch.isfinite(value).all() or value.requires_grad):
+                    raise ValueError('PRM advantages and returns must be aligned finite detached token tensors')
     group_weights = {}
     for index in range(count):
         group_id = _integer_scalar(rollout_data["rollout_ids"][index])
@@ -63,6 +83,13 @@ def _validate_rollout_data(args, rollout_id, rollout_data):
             raise ValueError("invalid native response length")
         if len(mask) != response_length or len(logprobs) != response_length:
             raise ValueError("native response field lengths differ")
+        if any(flag not in (0, 1) for flag in mask):
+            raise ValueError('Native response masks must be binary')
+        if algorithm == 'dapo' and (not all(mask) or mask_sum != response_length):
+            raise ValueError('DAPO requires all response tokens and exact per-sample token counts')
+        if teacher is not None and (len(teacher[index]) != response_length or any(
+                not _finite_scalar(value) or value > 0 for value in teacher[index])):
+            raise ValueError('OPD teacher token scores are invalid or misaligned')
         if any(not _finite_scalar(value) for value in logprobs):
             raise ValueError("nonfinite native rollout logprob")
         if (not _finite_scalar(rollout_data["rewards"][index])

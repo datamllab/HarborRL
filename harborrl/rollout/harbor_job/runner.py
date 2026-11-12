@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 from harborrl.math_registry import CLAUDE_CODE_HARNESS, NATIVE_TASK_PROVIDER
+from harborrl.rollout.harbor_job.bindings import environment_timeouts
 from harborrl.trajectories.native import Identity, digest, publish
 
 
@@ -81,6 +82,7 @@ async def execute(request, emit, read_command):
         "trial_name": digest(identity.to_dict()), "trials_dir": str(root / "harbor"),
         "agent": agent,
         "environment": environment,
+        **environment_timeouts(request['profile'], inspection['resources']),
         "verifier": {"disable": False, "override_timeout_sec": request["profile"]["verifier_timeout_sec"]}})
     trial = await Trial.create(config)
     trial_id = str(trial.id)
@@ -90,6 +92,9 @@ async def execute(request, emit, read_command):
         raise ValueError("expected run handshake before starting trial")
 
     async def event_hook(event):
+        if sandbox is not None and event.event == TrialEvent.ENVIRONMENT_START:
+            # Harbor awaits this public hook before starting its environment timer.
+            await trial.agent_environment.reserve_startup()
         record = {"type": "event", "event": event.event.value, "trial_id": str(event.trial_id),
                   "timestamp": event.timestamp.isoformat()}
         # Each event is an independent atomic record; never serialize config credentials.
@@ -98,7 +103,15 @@ async def execute(request, emit, read_command):
 
     for event in TrialEvent:
         trial.add_hook(event, event_hook)
-    running = asyncio.create_task(trial.run())
+
+    async def run():
+        try:
+            return await trial.run()
+        finally:
+            if sandbox is not None:
+                await trial.agent_environment.release_startup()
+
+    running = asyncio.create_task(run())
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, running.cancel)

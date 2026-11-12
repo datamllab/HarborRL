@@ -16,6 +16,15 @@ dependencies = [
 harborrl = "harborrl.cli:main"
 
 [project.optional-dependencies]
+distill = [
+  "torch>=2.5,<3",
+  "transformers>=4.49,<5",
+]
+
+prm = [
+  "torch>=2.4",
+  "transformers==4.46.3",
+]
 sandbox = [
   "harbor==0.23.0; python_version >= '3.12'",
   "opensandbox==0.1.9; python_version >= '3.12'",
@@ -43,3 +52,6 @@ exclude = ["runs*", ".venv*", "workspace*", "local*", "docs*", "tests*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/test_consistency_torch.py" = ["E402"]

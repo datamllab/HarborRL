@@ -40,7 +40,9 @@ sampling:
   group_size: 2
   groups_per_batch: 1
   max_attempts: 2
-  max_context: 8192
+  # Claude Code's system/tool prompt alone can exceed 19K input tokens.
+  # Reserve room for that prompt and the response; longer tasks may need more.
+  max_context: 32768
   max_tokens: 1024
 
 deployment:

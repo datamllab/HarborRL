@@ -25,6 +25,10 @@
 
 ## News
 
+- **2026-11-12** 新增网关弹性扩展：静态路由、弹性自动扩容（多机优先）与自动缩容。
+- **2026-11-12** 新增 Hub 部署模式：适配单向网络集群，节点经 HTTP 拉取任务，无需跨机 SSH。
+- **2026-11-12** 统一接入多种算法，使用数学任务训练验证。
+- **2026-11-12** 优化配置向导、Web 控制台与 Sandbox 执行的审计清理。
 - **2026-10-26** 新增[离线配置向导](docs/configuration-wizard.md)和[本地 Web 控制台](docs/web-console.md)，支持配置、校验、dry-run、训练启动和日志查看。
 - **2026-10-26** 新增 [controller/GPU 部署配置](docs/deployment.md)、可选的 [OpenSandbox 执行能力](docs/sandbox-rollout.md)，以及按需启用的[训练与推理一致性检查](docs/train-inference-consistency.md)。
 - **10/2026** 📣📣📣 HarborRL released
@@ -42,45 +46,8 @@ HarborRL 支持 **Models × Algorithms × Tasks × Harnesses (MATH)** 的灵活�
 
 ## AI 辅助配置
 
-如果你希望让 AI agent 辅助完成本 repo 的部署和训练验证，请让它先阅读并严格遵循
-[docs/agents/environment-check.md](docs/agents/environment-check.md)。
+使用 `harborrl options` 离线浏览能力，`harborrl init` 交互式或答案文件配置，`harborrl web` 打开本地控制台。完整工作流（含 AI 代理部署）见[配置指南](docs/configuration-wizard.md)。
 
-离线选项目录、交互式配置和 answer-file 配置方式见[配置 CLI 指南](docs/configuration-wizard.md)。
-首次使用可以先运行 `harborrl hello`：无需模型、GPU 或已有 task JSON，
-即可执行脚本任务、真实 verifier、0/1 奖励收集和使用示例 token 的 GRPO batch 导出。
-接着使用 `harborrl options` 或 `harborrl init --help`。Local 模式会检测并共用
-一套源码目录与 Python；模型指纹自动计算，未填完的草稿支持 `:save` 保存和 `--resume` 恢复。
-运行 `harborrl web` 可打开浏览器控制台，查看或套用 Local／Sandbox 示例、
-随时保存草稿、一键运行 Hello World，并完成校验、dry-run、训练启动和日志查看；
-远程访问与生命周期说明见 [Web 控制台指南](docs/web-console.md)。
-
-推荐的实际操作流程是把下面这段提示词交给 agent，并把尖括号内容替换成你的机器信息：
-
-```text
-阅读 docs/agents/environment-check.md，并严格按该协议执行。
-目标：[仅 CPU 开发 | CPU rollout 与 GPU training 分离的原生部署]
-配置：<Path to config.yaml>，或 none
-拓扑：controller=<Your IP address>:<Port Number>;
-  rollout workers=<Rollout worker IP address>:<Port Number>;
-  GPU machine=<GPU machine IP address>:<Port Number>
-
-先只执行只读检查。返回协议要求的结构化报告，并告诉我能解决一个阻塞项的
-最小下一步命令。未经我明确同意，不要安装、下载、拉取镜像、挂载存储或启动
-服务。每次经我同意修改后，重新运行相关检查。原生部署最后执行 harborrl
-doctor 和 launch_native --dry-run。
-```
-
-你可以按以下清单确认部署是否正确：
-
-1. agent 报告一个验收等级：`cpu_development`、`deployment_preflight` 或
-   `training`；不得把 CPU-only 检查或 dry run 提升为更高等级。
-2. CPU 开发通过的标准是 `uv run harborrl --help` 和 `uv run pytest` 均成功。
-3. 原生部署通过的标准是所有可静态验证的 rollout worker、GPU 和跨机检查均为
-   `ready`；`harborrl doctor` 没有失败检查；`uv run harborrl train
-   <Path to config.yaml> --dry-run` 能解析出 launch plan。
-4. 每个 `unknown` 项都必须说明推迟原因。训练前的 live gateway 和 task image
-   检查可以合理地保持为 deferred。
-5. agent 必须等待用户明确同意后才能启动真实训练。
 
 ## 快速开始
 
@@ -112,13 +79,9 @@ uv run pytest
 如需原生训练，请把固定版本的 native 训练栈安装到可写位置：
 
 ```bash
-bash scripts/bootstrap_backends.sh "<Path to HarborRL backends>"
-. "<Path to HarborRL backends>/harborrl-backend.env"
+bash scripts/bootstrap_backends.sh <Path to HarborRL backends>
+. <Path to HarborRL backends>/harborrl-backend.env
 ```
-
-生成的文件会将 `SLIME_DIR`、`MEGATRON_DIR` 和 `SGLANG_IMAGE` 导出给子进程。
-对于旧版 bootstrap 脚本生成的文件，请在 source 前执行 `set -a`，之后执行 `set +a`。
-清理标记的恢复步骤和无 GPU 回归命令见[rollout 生命周期与恢复](docs/rollout-runtime-lifecycle.md)。
 
 ### 训练
 
@@ -142,27 +105,8 @@ bash scripts/launch_native.sh --config <Path to config.yaml> --backends <Path to
 
 ## 任务配置
 
-训练由一个 YAML 文件配置，其 section 和字段集合固定。相对路径按 YAML 文件所在目录解析，可重复使用 `--set section.field=value` 覆盖并再次校验。请从 [examples/native/train_qwen_native.yaml](examples/native/train_qwen_native.yaml) 开始修改 site-specific 配置。
+训练使用单个 YAML 文件配置；完整字段说明、任务目录结构与 catalog 锁定见[任务配置](docs/task-configuration.md)。
 
-配置大体分为三部分：`execution` 固定使用 `harbor_job`；`harbor`、`gateway` 和 `deployment` 描述 rollout worker、服务入口与 GPU 拓扑；`tasks`、`harness`、`model`、`training`、`sampling` 和 `output` 描述实验内容与输出位置。
-
-HarborRL 直接消费 Harbor 认可的 native task，不维护各 benchmark 的私有任务转换格式。典型任务目录是：
-
-```text
-task/
-├── task.toml
-├── instruction.md
-├── environment/Dockerfile
-└── tests/test.sh
-```
-
-其中 `task.toml` 声明资源、agent 与 verifier，`instruction.md` 是给 agent 的任务说明，`environment/Dockerfile` 构建隔离执行环境，`tests/test.sh` 负责验证并输出 `reward.json` 或 `reward.txt`。训练时，这些任务会被锁定到 catalog 中，记录任务 ID、上游 revision、本地路径、内容 digest 和 reward 解析规则；示例见 [examples/native/catalog.json](examples/native/catalog.json)。
-
-仓库内置的可直接运行示例是 `hello_world`。示例允许联网，以便 Harbor 安装固定版本的 Claude Code CLI；内存与存储各配置 4 GiB，verifier 将 0/1 奖励写入 `/logs/verifier/reward.json`。profile 允许四轮交互，供 agent 执行工具、读取结果并正常结束。离线部署需要预装完全一致的 CLI 版本，并确保能够访问 policy gateway。修改任务内容后，需要重新生成 catalog 中的内容摘要。
-
-示例固定使用经过运行验证的 Claude Code `2.1.141`。adapter 默认关闭 prompt caching 及缓存预热、上下文压缩和非必要流量；自定义工具禁用列表也会保留 `Agent` 和 `Task`。CLI `2.1.0` 在 Bash 执行后仍会发起独立的文件路径提取请求，不符合单上下文 rollout 契约。使用其他 CLI 版本前需要重新验证；原生会话审计会拒绝辅助上下文、摘要和未消费的模型响应。
-
-实际训练任务不由本 repo 重新打包，而是从 Harbor Hub 获取符合 Harbor native task 格式的 dataset/task；可先查看[兼容性汇总](configs/harbor_hub/public_compatibility_summary_zh.md)了解已验证覆盖情况。取回 task root 后，先用 `harborrl hub inspect` 做本地静态校验，再锁定进自己的 catalog。
 
 ## License
 

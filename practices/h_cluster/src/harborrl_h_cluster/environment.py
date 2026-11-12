@@ -96,7 +96,7 @@ class BrainboxEnvironment(ManagedOpenSandboxEnvironment):
 
     def startup_transport(self, allocated):
         return SandboxStartupTransport(self.cfg['domain'].rstrip('/') + '/v1', allocated,
-                                       timeout=self.cfg['create_timeout_s'])
+                                       timeout=self.cfg['create_timeout_s'], on_request=self.record_request)
 
     def _build_resource(self):
         resource = super()._build_resource()

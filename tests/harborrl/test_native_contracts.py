@@ -73,6 +73,16 @@ def test_roundtrip_and_synthetic_gate(tmp_path):
         publish(path, {**ir, "readiness": "RL_READY"})
 
 
+def test_unavailable_tool_cannot_enter_training_without_native_rejection(tmp_path):
+    ir = make_ir(tmp_path)
+    turn = ir['turns'][0]
+    turn['response']['content'] = [{'type': 'tool_use', 'id': 'u', 'name': 'Check', 'input': {}}]
+    turn['response_digest'] = digest(turn['response'])
+    ir['trace_seal']['turns_digest'] = digest(ir['turns'])
+    with pytest.raises(ValueError, match='unconfirmed_tool_rejection'):
+        require_ready(ir, allow_synthetic=True)
+
+
 @pytest.mark.parametrize("reward", [True, False, None, "1", float("nan"), float("inf"), -1, 2])
 def test_invalid_reward(reward):
     with pytest.raises(ValueError):

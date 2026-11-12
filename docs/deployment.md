@@ -98,6 +98,39 @@ requires a complete group of at least two slots on the locked policy version,
 and only then converts trajectories into Slime samples. It is selected by
 `HARBORRL_ROLLOUT_SERVICE_URL` in the GPU job environment.
 
+## Service shutdown and recovery
+
+The service holds an OS file lock on its shared run directory until shutdown
+completes or its process exits. Registration persists the run manifest; a
+different manifest for the same run is rejected even after a restart. Run and
+group IDs must each be a single directory component.
+
+Registration restores durable group outcomes. Repeating a completed request
+returns its original result without regenerating trajectories or rewriting
+immutable records. Failed and cancelled groups retain their outcomes. The GPU
+client still validates all trajectory evidence before accepting a recovered
+result. Completion is reported only after the result has been published.
+
+A group without a durable terminal outcome becomes `unknown`. The service does
+not adopt its previous Runner or replay partial work. It writes `unknown.json`
+and `native-rollouts/cleanup-required.json`, blocks new groups for that run, and
+returns the unknown outcome to polling clients. Inspect and confirm cleanup,
+retain the original evidence, then use a fresh run for further sampling. This
+recovers results and status; it does not resume an Agent or optimizer.
+
+`RolloutService.close()` blocks admission, cancels groups and waits for their
+asynchronous Runner cleanup, drains generation, then closes the Gateway and
+executor loop. Its cleanup budget covers the Runner's 120-second cancellation
+deadline and configured Sandbox cleanup deadlines. A generation drain alone
+does not wait for tools, verification or environment deletion.
+
+A cleanup timeout raises an error and leaves cleanup running. Incomplete
+shutdown writes a cleanup-required marker; another close can wait for cleanup
+without cancelling the same group again. The controller closes its HTTP listener
+even when service shutdown fails. Both Docker and Sandbox runtimes reject new
+attempts while observed cleanup-required markers remain. Inspect the resources
+before removing resolved markers.
+
 ## Operational limits
 
 Service mode requires shared storage visible at the configured paths on the

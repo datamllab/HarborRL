@@ -1,0 +1,21 @@
+schema_version: 1
+method: reinforce
+tasks:
+  path: math.jsonl
+student:
+  kind: tiny_qwen
+teacher:
+  kind: none
+prm:
+  kind: none
+sampling:
+  max_new_tokens: 1
+  max_context: 128
+training:
+  steps: 2
+  batch_size: 64
+  outcome_weight: 1.0
+deployment:
+  device: cpu
+output:
+  directory: ../../runs/math-outcome-smoke

@@ -1,0 +1,35 @@
+schema_version: 2
+execution:
+  backend: text_math
+algorithm:
+  name: grpo
+tasks:
+  path: tasks.jsonl
+model:
+  checkpoint: /models/Qwen3-8B
+  reference: /models/Qwen3-8B_torch_dist
+  args_file: qwen3-8B
+training:
+  export_hf: true
+  num_rollout: 3
+  learning_rate: 0.000001
+  save_interval: 1
+  backend_contract: slime-v0.3.2-native-v1
+  resume: null
+sampling:
+  group_size: 4
+  groups_per_batch: 8
+  max_attempts: 1
+  max_tokens: 1024
+  max_context: 2048
+deployment:
+  layout: split
+  num_gpus: 4
+  actor_gpus: 2
+  rollout_gpus: 2
+  actor_tensor_parallel_size: 2
+  rollout_gpus_per_engine: 2
+output:
+  root: /runs/math
+consistency:
+  mode: "off"

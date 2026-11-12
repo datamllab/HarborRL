@@ -16,7 +16,7 @@ from harborrl.trajectories.native import Identity, finite, require_ready
 
 
 def group_statistics(rewards, *, epsilon=1e-6):
-    """Population mean/std and GRPO advantages for one complete group."""
+    """Population statistics and centered GRPO advantages without std scaling."""
     values = list(rewards)
     if len(values) < 2:
         raise ValueError("a complete group of at least two trajectories is required")
@@ -28,7 +28,7 @@ def group_statistics(rewards, *, epsilon=1e-6):
     std = math.sqrt(math.fsum((value - mean) ** 2 for value in values) / len(values))
     if not finite(mean) or not finite(std):
         raise ValueError("nonfinite group statistics")
-    advantages = [0.0 if std == 0 else (value - mean) / (std + epsilon) for value in values]
+    advantages = [value - mean for value in values]
     return mean, std, advantages
 
 

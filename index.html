@@ -63,7 +63,17 @@
 
     
     
-  </head>
+  
+<style>
+/* Home page: hide left nav, center content */
+.md-sidebar--primary { display: none !important; }
+.md-content { max-width: 52rem; margin: 0 auto; }
+.md-content__inner { margin: 0 auto; }
+@media (min-width: 1220px) {
+  .md-content { margin-left: calc(50% - 26rem); }
+}
+</style>
+</head>
   
   
     

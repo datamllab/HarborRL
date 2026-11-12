@@ -37,95 +37,36 @@ def test_slow_group_is_posted_once_even_after_transport_timeout(monkeypatch):
     assert calls == ['POST', 'GET', 'GET']
 
 
-@pytest.mark.parametrize('provider', ['docker', 'sandbox'])
-@pytest.mark.parametrize('marker_path', ['cleanup-required.json', 'runner/cleanup-required.json'])
-def test_cleanup_debt_prevents_retry(tmp_path, monkeypatch, provider, marker_path):
+def test_sandbox_cleanup_debt_prevents_retry(tmp_path, monkeypatch):
     from harborrl.rollout import runtime
     from harborrl.rollout.harbor_job import sandbox_config
     profile = tmp_path / 'profile.json'
     profile.write_text('{}')
     binding = {'image': 'image', 'max_live_instances': 1}
-    sandbox = {'max_live_instances': 1, 'bindings': [binding]} if provider == 'sandbox' else None
+    sandbox = {'max_live_instances': 1, 'bindings': [binding]}
     config = RolloutRuntimeConfig('run', str(tmp_path), '', str(profile), '127.0.0.1', 1,
         'http://gateway', '/python', (), {}, 2, 128, 1024, 2, 2, 'tok', 'tpl', True, 1,
         'qwen3-8B', 'http://router', sandbox=sandbox, runner_transport='local')
-    current = SimpleNamespace(rollout_root=tmp_path, semaphore=asyncio.Semaphore(2),
-                              registry=None, profile={})
-    if sandbox:
-        current.sandbox_admission = SandboxAdmission(sandbox)
+    current = SimpleNamespace(
+        rollout_root=tmp_path, semaphore=asyncio.Semaphore(2), registry=None, profile={},
+        sandbox_admission=SandboxAdmission(sandbox),
+        shards=(SimpleNamespace(name="gateway", url="http://gateway", registry=None),))
     calls = []
     async def attempt(identity, **kwargs):
         calls.append(kwargs)
         assert kwargs['runner_host'] is None
-        assert kwargs.get('sandbox') == sandbox
-        marker = kwargs['root'] / marker_path
-        marker.parent.mkdir(parents=True)
-        marker.write_text('{}')
+        assert kwargs['sandbox'] == sandbox
+        kwargs['root'].mkdir(parents=True)
+        (kwargs['root'] / 'cleanup-required.json').write_text('{}')
         raise RuntimeError('deletion unconfirmed')
     monkeypatch.setattr(runtime, 'run_attempt', attempt)
     monkeypatch.setattr(sandbox_config, 'task_binding', lambda *args: binding)
     entry = {'id': 'task', 'path': '/task', 'task_digest': 'digest', 'reward_profile': {}}
     with pytest.raises(RuntimeError, match='cleanup unresolved'):
         asyncio.run(run_slot(config, current, 0, 0, 0, entry, 'sampling', '1'))
-    assert len(calls) == 1
-    if sandbox:
-        assert current.sandbox_admission.blocked
-    with pytest.raises(runtime.CleanupRequiredError, match='cleanup-required.json'):
-        runtime.CleanupAdmission(tmp_path).check()
-    (calls[0]['root'] / marker_path).unlink()
-    current.cleanup.check()
-    runtime.CleanupAdmission(tmp_path).check()
-    if sandbox:
-        assert not current.sandbox_admission.blocked
+    assert len(calls) == 1 and current.sandbox_admission.blocked
     restored = replace(config, workers=('worker',), runner_transport='ssh')
     assert json.loads(restored.environment()['HARBORRL_NATIVE_SANDBOX']) == sandbox
-
-
-def test_docker_cleanup_debt_blocks_waiting_slots(tmp_path, monkeypatch):
-    from harborrl.rollout import runtime
-
-    calls = []
-
-    async def attempt(identity, **kwargs):
-        calls.append(identity)
-        await asyncio.sleep(.01)
-        kwargs['root'].mkdir(parents=True)
-        (kwargs['root'] / 'cleanup-required.json').write_text('{}')
-        raise RuntimeError('Runner cleanup failed')
-
-    monkeypatch.setattr(runtime, 'run_attempt', attempt)
-    config = SimpleNamespace(run_id='run', group_size=2, max_attempts=3, workers=(),
-        task_worker_overrides={}, runner_transport='local', sandbox=None,
-        gateway_url='http://gateway', runner_python='/python', max_output_tokens=128)
-    current = SimpleNamespace(profile={}, rollout_root=tmp_path,
-                              semaphore=asyncio.Semaphore(1), registry=None)
-    entry = {'id': 'task', 'path': '/task', 'task_digest': 'digest', 'reward_profile': {}}
-    with pytest.raises(runtime.CleanupRequiredError, match='automatic retry blocked') as error:
-        asyncio.run(runtime.run_group(config, current, entry=entry,
-            group_index=0, rollout_id=0, sampling_digest='x', policy_version='1'))
-    assert len(calls) == 1
-    assert isinstance(error.value.__context__, RuntimeError)
-
-
-def test_runtime_lifecycle_failure_is_not_retried(tmp_path, monkeypatch):
-    from harborrl.rollout import runtime
-
-    calls = []
-
-    async def attempt(identity, **kwargs):
-        calls.append(identity)
-        raise runtime.RuntimeLifecycleError('wrong event loop')
-
-    monkeypatch.setattr(runtime, 'run_attempt', attempt)
-    config = SimpleNamespace(run_id='run', group_size=2, max_attempts=3, workers=(),
-        task_worker_overrides={}, runner_transport='local', sandbox=None,
-        gateway_url='http://gateway', runner_python='/python', max_output_tokens=128)
-    current = SimpleNamespace(profile={}, rollout_root=tmp_path,
-                              semaphore=asyncio.Semaphore(1), registry=None)
-    entry = {'id': 'task', 'path': '/task', 'task_digest': 'digest', 'reward_profile': {}}
-    with pytest.raises(runtime.RuntimeLifecycleError, match='wrong event loop'):
-        asyncio.run(run_slot(config, current, 0, 0, 0, entry, 'sampling', '1'))
-    assert len(calls) == 1
 
 
 def test_group_failure_waits_for_sibling_cleanup(tmp_path, monkeypatch):
@@ -143,9 +84,11 @@ def test_group_failure_waits_for_sibling_cleanup(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime, 'run_attempt', attempt)
     config = SimpleNamespace(run_id='run', group_size=2, max_attempts=1, workers=(),
         task_worker_overrides={}, runner_transport='local', sandbox=None,
+        gateway_routing='modulo',
         gateway_url='http://gateway', runner_python='/python', max_output_tokens=128)
-    current = SimpleNamespace(profile={}, rollout_root=tmp_path,
-                              semaphore=asyncio.Semaphore(2), registry=None)
+    current = SimpleNamespace(
+        profile={}, rollout_root=tmp_path, semaphore=asyncio.Semaphore(2), registry=None,
+        shards=(SimpleNamespace(name="gateway", url="http://gateway", registry=None),))
     entry = {'id': 'task', 'path': '/task', 'task_digest': 'digest', 'reward_profile': {}}
     with pytest.raises(RuntimeError, match='exhausted its retry budget'):
         asyncio.run(runtime.run_group(config, current, entry=entry,

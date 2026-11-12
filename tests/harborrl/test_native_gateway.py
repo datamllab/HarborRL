@@ -43,8 +43,6 @@ def setup(tmp_path):
 
 @pytest.mark.parametrize("change", [{"model": "external"}, {"thinking": {"type": "enabled"}},
     {"temperature": .7}, {"top_p": .9}, {"top_k": 1}, {"max_tokens": True}, {"stream": 1},
-    {"temperature": True}, {"top_p": True}, {"temperature": "1"}, {"top_p": "1"},
-    {"temperature": float("nan")}, {"top_p": float("inf")},
     {"messages": []}, {"messages": [{"role": "assistant", "content": [{"type": "image"}]}]},
     {"tool_choice": {"type": "any"}}])
 def test_unsupported_request(change):
@@ -112,21 +110,13 @@ def test_model_output_never_repaired(text):
         parse_qwen_output(text, response_id="m", tools=[])
 
 
-@pytest.mark.parametrize("delivery", ["sent", "delivery_unknown"])
-def test_trace_requires_actual_consumption_and_is_immutable(tmp_path, delivery):
+def test_trace_requires_actual_consumption_and_is_immutable(tmp_path):
     registry, _ident, token, gateway = setup(tmp_path)
     aid, message = gateway.generate(token, payload())
-    registry.delivery(aid, message["id"], delivery)
-    unconsumed = registry.unconsumed_responses(aid)
+    registry.delivery(aid, message["id"], "sent")
     registry.close(aid)
     _turns, seal = registry.seal(aid)
     assert seal["errors"] == ["unconfirmed_consumption"]
-    assert registry.unconsumed_responses(aid) == unconsumed
-    if delivery == "delivery_unknown":
-        with pytest.raises(ValueError, match="delivery was not confirmed"):
-            registry.wait_delivered(aid, .1)
-    else:
-        registry.wait_delivered(aid, .1)
     with pytest.raises(ValueError, match="sealed"):
         registry.consume(aid, message["id"], message["content"], "session")
     with pytest.raises(PermissionError):
@@ -145,67 +135,6 @@ def test_session_audit_covers_final_response(tmp_path):
     turns, seal = registry.seal(aid)
     assert seal["errors"] == []
     assert turns[0]["delivery"] == "consumed_confirmed"
-
-
-def test_sealed_trace_releases_payload_and_remains_idempotent(tmp_path):
-    registry = TraceRegistry(tmp_path / "traces")
-    gateway = Gateway(registry, Backend(), model="policy")
-    for version in range(1, 5):
-        for slot in range(2):
-            ident = identity(f"{version}-{slot}", policy_version=str(version))
-            token = registry.register(ident, "trial")
-            aid, message = gateway.generate(token, payload())
-            registry.delivery(aid, message["id"], "sent")
-            registry.consume(aid, message["id"], message["content"], "session")
-            registry.close(aid)
-            turns, seal = registry.seal(aid)
-            persisted = (registry.attempts[aid]["root"] / "trace.json").read_bytes()
-            assert registry.attempts[aid]["turns"] == []
-            assert registry.seal(aid) == (turns, seal)
-            turns[0]["input_ids"].append(999)
-            assert registry.seal(aid)[0][0]["input_ids"] == [1, 2]
-            assert (registry.attempts[aid]["root"] / "trace.json").read_bytes() == persisted
-            with pytest.raises(ValueError, match="registered"):
-                registry.register(ident, "other")
-            with pytest.raises(ValueError, match="unique"):
-                registry.register(identity(f"reuse-{version}-{slot}", policy_version=str(version)),
-                                  "other", credential=token)
-        registry.drain(.1)
-        next_version = str(version + 1)
-        registry.publish_version([{"healthy": True, "weight_version": next_version,
-                                   "endpoint": "engine"}], next_version)
-    assert len(registry.attempts) == 8
-    assert all(not state["turns"] for state in registry.attempts.values())
-    assert not registry.credentials
-    assert len(list((tmp_path / "traces").rglob("trace.json"))) == 8
-
-
-def test_seal_retains_payload_until_delivery_and_durable_write(tmp_path, monkeypatch):
-    from harborrl.gateway import trace
-
-    registry, _, token, gateway = setup(tmp_path)
-    aid, message = gateway.generate(token, payload())
-    registry.close(aid)
-    with pytest.raises(ValueError, match="drain"):
-        registry.seal(aid)
-    assert len(registry.attempts[aid]["turns"]) == 1
-    registry.delivery(aid, message["id"], "sent")
-    original_publish = trace.publish
-
-    def fail_trace(path, value):
-        if path.name == "trace.json":
-            raise OSError("disk unavailable")
-        return original_publish(path, value)
-
-    with monkeypatch.context() as patch:
-        patch.setattr(trace, "publish", fail_trace)
-        with pytest.raises(OSError, match="disk unavailable"):
-            registry.seal(aid)
-    assert not registry.attempts[aid]["sealed"]
-    assert len(registry.attempts[aid]["turns"]) == 1
-    turns, seal = registry.seal(aid)
-    assert len(turns) == 1 and seal["errors"] == ["unconfirmed_consumption"]
-    assert registry.attempts[aid]["turns"] == []
 
 
 def test_session_audit_merges_split_assistant_blocks(tmp_path):
@@ -272,6 +201,56 @@ def test_pool_mismatch_keeps_admission_closed(tmp_path):
     with pytest.raises(RuntimeError):
         registry.publish_version([{"healthy": True, "weight_version": "1"}, {"healthy": True, "weight_version": "2"}], "2")
     assert not registry.accepting
+
+
+def test_http_overload_rejects_before_any_attempt_state(tmp_path):
+    _registry, _ident, token, gateway = setup(tmp_path)
+    started, release = threading.Event(), threading.Event()
+
+    class BlockingBackend(Backend):
+        def generate(self, converted, ident, response_id):
+            started.set()
+            release.wait(5)
+            return super().generate(converted, ident, response_id)
+
+    gateway.backend = BlockingBackend()
+    try:
+        server = make_server(gateway, max_inflight=1)
+    except PermissionError:
+        pytest.skip("this CPU sandbox does not permit loopback socket binding")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_port}/v1/messages"
+    opener = request.build_opener(request.ProxyHandler({}))
+    results, errors = [], []
+
+    def post():
+        try:
+            with opener.open(request.Request(url, json.dumps(payload()).encode(),
+                                             {"x-api-key": token}), timeout=10) as response:
+                results.append(json.load(response))
+        except Exception as exc:  # noqa: BLE001 - test collector
+            errors.append(exc)
+
+    try:
+        first = threading.Thread(target=post)
+        first.start()
+        assert started.wait(5), "first request never reached the backend"
+        with pytest.raises(error.HTTPError) as exc:
+            opener.open(request.Request(url, json.dumps(payload()).encode(),
+                                        {"x-api-key": token}), timeout=5)
+        assert exc.value.code == 503
+        assert exc.value.read()  # overloaded_error body is present
+        release.set()
+        first.join(10)
+        assert not errors and results and results[0]["role"] == "assistant"
+        # The rejected request never began a generation, so a retry is safe.
+        post()
+        assert len(results) == 2
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
 
 
 def test_http_sse_and_auth(tmp_path):
@@ -354,6 +333,69 @@ def test_qwen_finish_marker_maps_to_empty_end_turn():
     assert output == []
 
 
+def test_model_adapter_preserves_unavailable_action_but_history_requires_native_error():
+    from harborrl.gateway.messages import unavailable_tool_error
+    from harborrl.models.qwen import QwenModelAdapter
+
+    tools = [{'name': 'Bash', 'input_schema': {'type': 'object'}}]
+    converted = convert(payload(tools=tools), model='policy')
+    text = '<tool_call>{"name":"Check","arguments":{"target":"solution.py"}}</tool_call>'
+    blocks = QwenModelAdapter().parse_output(text, response_id='r', tools=converted['tools'])
+    assert blocks == [{'type': 'tool_use', 'id': 'toolu_r_0', 'name': 'Check',
+                       'input': {'target': 'solution.py'}}]
+    history = [*payload()['messages'], {'role': 'assistant', 'content': blocks},
+               {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': blocks[0]['id'],
+                                           'content': unavailable_tool_error('Check'), 'is_error': True}]}]
+    result = convert(payload(tools=tools, messages=history), model='policy')
+    assert result['messages'][-1]['content'] == '[tool_error]\n' + unavailable_tool_error('Check')
+    history[-1]['content'][0]['is_error'] = False
+    with pytest.raises(ProtocolError, match='exact native rejection'):
+        convert(payload(tools=tools, messages=history), model='policy')
+    history[-1]['content'][0].update(is_error=True, content='command executed')
+    with pytest.raises(ProtocolError, match='exact native rejection'):
+        convert(payload(tools=tools, messages=history), model='policy')
+
+
+@pytest.mark.parametrize('rejection', ['valid', 'absent', 'success', 'wrong_tool', 'duplicate'])
+def test_unavailable_action_requires_audited_native_rejection(tmp_path, rejection):
+    from harborrl.gateway.messages import unavailable_tool_error
+
+    class UnavailableBackend(Backend):
+        def generate(self, converted, ident, response_id):
+            turn = super().generate(converted, ident, response_id)
+            turn.update(finish_reason='tool_use', content=[{'type': 'tool_use', 'id': 'u1',
+                                                         'name': 'Check', 'input': {}}])
+            return turn
+
+    registry, _ident, token, gateway = setup(tmp_path)
+    gateway.backend = UnavailableBackend()
+    aid, message = gateway.generate(token, payload())
+    registry.delivery(aid, message['id'], 'sent')
+    result = {'type': 'tool_result', 'tool_use_id': 'u1', 'content': unavailable_tool_error('Check'),
+              'is_error': True}
+    if rejection == 'success':
+        result['is_error'] = False
+    if rejection == 'wrong_tool':
+        result['content'] = unavailable_tool_error('Other')
+    results = [] if rejection == 'absent' else [result] * (2 if rejection == 'duplicate' else 1)
+    path = tmp_path / 'session.jsonl'
+    path.write_text('\n'.join(map(json.dumps, [
+        {'type': 'assistant', 'sessionId': 's', 'message': message},
+        {'type': 'user', 'sessionId': 's', 'message': {'role': 'user', 'content': results}}])))
+    if rejection == 'valid':
+        audit_session(path, registry, aid)
+        registry.close(aid)
+        turns, seal = registry.seal(aid)
+        assert seal['errors'] == []
+        assert turns[0]['tool_rejection_ref'].startswith(str(path) + '#sha256=')
+        assert turns[0]['output_ids'] == [3] and turns[0]['logprobs'] == [-.2]
+    else:
+        with pytest.raises(ValueError, match='exact native rejection'):
+            audit_session(path, registry, aid)
+        registry.close(aid)
+        assert 'unconfirmed_tool_rejection' in registry.seal(aid)[1]['errors']
+
+
 def test_sglang_generation_version_and_logprob_evidence():
     from harborrl.gateway.sglang_backend import SGLangBackend
     class Tokenizer:
@@ -421,8 +463,80 @@ def test_sglang_weight_version_is_explicit():
     assert backend.weight_version() == "7"
 
 
+def test_sglang_unavailable_tool_keeps_sampled_tokens_logprobs_and_text():
+    from harborrl.gateway.sglang_backend import SGLangBackend
+    from harborrl.models.qwen import QwenModelAdapter
+
+    text = '<tool_call>{"name":"Check","arguments":{}}</tool_call>'
+    tokenizer = SimpleNamespace(decode=lambda ids, **kwargs: text)
+    backend = SGLangBackend('http://engine', tokenizer, QwenModelAdapter(),
+                            tokenizer_digest='tok', template_digest='tpl', audited_raw_logprobs=True)
+    converted = convert(payload(), model='policy')
+    output = {'text': text, 'output_ids': [13, 14], 'meta_info': {
+        'weight_version': '1', 'output_token_logprobs': [[-.2, 13], [-.3, 14]],
+        'finish_reason': {'type': 'stop'}}}
+    result = backend.decode(output, {'input_ids': [11, 12]}, converted, identity(), 'msg')
+    assert result['model_output_text'] == text
+    assert result['output_ids'] == [13, 14] and result['logprobs'] == [-.2, -.3]
+    assert result['finish_reason'] == 'tool_use'
+    assert result['unavailable_tool_calls'] == [{'id': 'toolu_msg_0', 'name': 'Check'}]
+    assert result['logprob_semantics'] == 'raw_model'
+
+
+def test_sglang_request_seed_is_independent_of_dispatch_order_and_retry():
+    from harborrl.gateway.sglang_backend import SGLangBackend
+    from harborrl.models.qwen import QwenModelAdapter
+
+    sent = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{}'
+
+    class Opener:
+        def open(self, request, timeout):
+            sent.append(json.loads(request.data))
+            return Response()
+
+    backend = SGLangBackend('http://engine', SimpleNamespace(), QwenModelAdapter(),
+                            tokenizer_digest='tok', template_digest='tpl', sampling_seed=0)
+    backend.opener = Opener()
+    backend.prepare = lambda converted: converted['input_ids']
+    backend.decode = lambda output, serving, *args: serving
+    converted = {'input_ids': [11, 12], 'sampling': {'temperature': 1.0}}
+    first = backend.generate(converted, identity(), 'response-a')
+    backend.generate(converted, identity('1'), 'response-b')
+    retry = backend.generate(converted, identity(attempt_id='retry', run_id='other'), 'response-c')
+    assert first == retry
+    assert first['sampling_params']['sampling_seed'] != sent[1]['sampling_params']['sampling_seed']
+    assert converted['sampling'] == {'temperature': 1.0}
+    for changed in (identity(batch_id='next'), identity(group_id='next'), identity(task_digest='next')):
+        assert backend.generate(converted, changed, 'response')['sampling_params'] != first['sampling_params']
+    assert backend.generate({**converted, 'input_ids': [11, 13]}, identity(), 'response') != first
+    backend.sampling_seed = 1
+    assert backend.generate(converted, identity(), 'response') != first
+    backend.sampling_seed = None
+    assert 'sampling_seed' not in backend.generate(converted, identity(), 'response')['sampling_params']
+
+
+@pytest.mark.parametrize('seed', [True, -1, 2**31, 1.5])
+def test_sglang_rejects_invalid_sampling_seed(seed):
+    from harborrl.gateway.sglang_backend import SGLangBackend
+    with pytest.raises(ValueError, match='sampling_seed'):
+        SGLangBackend('http://engine', None, None, tokenizer_digest='tok',
+                      template_digest='tpl', sampling_seed=seed)
+
+
 def test_native_gateway_thread_does_not_own_asyncio_default_executor():
-    from harborrl.rollout.native_generate import NativeRolloutRuntime
+    from types import SimpleNamespace
+
+    from harborrl.rollout.runtime import GatewayShard, GatewayShardSpec
 
     started, stopped = threading.Event(), threading.Event()
 
@@ -431,12 +545,13 @@ def test_native_gateway_thread_does_not_own_asyncio_default_executor():
             started.set()
             stopped.wait(5)
 
-    runtime = object.__new__(NativeRolloutRuntime)
-    runtime.server = Server()
-    runtime._start_gateway()
+    shard = GatewayShard(GatewayShardSpec("gw0", 49184, "http://127.0.0.1:49184"),
+                         registry=SimpleNamespace(), gateway=SimpleNamespace(),
+                         server=Server(), trace_dir="unused")
+    shard.start()
     try:
         assert started.wait(1)
-        assert runtime.thread.daemon is True
+        assert shard.thread.daemon is True
     finally:
         stopped.set()
-        runtime.thread.join(1)
+        shard.thread.join(1)

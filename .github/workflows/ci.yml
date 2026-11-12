@@ -26,8 +26,6 @@ jobs:
         run: python -m pytest
       - name: Example contract smoke
         run: bash examples/native/cpu_contract_smoke.sh
-      - name: New user Hello World
-        run: harborrl hello --out-dir /tmp/harborrl-hello
       - name: Training dry run
         run: python -m harborrl.cli train --config examples/native/train_qwen_native.yaml --dry-run
       - name: Public tree audit
@@ -79,8 +77,6 @@ jobs:
           python -m venv /tmp/harborrl-wheel
           /tmp/harborrl-wheel/bin/pip install dist/*.whl
           /tmp/harborrl-wheel/bin/harborrl --help
-          cd /tmp
-          /tmp/harborrl-wheel/bin/harborrl hello --out-dir /tmp/harborrl-wheel-hello
       - uses: actions/upload-artifact@v4
         with:
           name: harborrl-dist

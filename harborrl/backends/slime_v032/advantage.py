@@ -17,7 +17,7 @@ def _response_values(prototype, value):
         return torch.full(
             (len(prototype),),
             float(value),
-            dtype=prototype.dtype,
+            dtype=torch.float32,
             device=prototype.device,
         )
     return [float(value)] * len(prototype)

@@ -1,0 +1,23 @@
+# Existing local models only. No download, remote code, or cross-tokenizer alignment.
+schema_version: 1
+method: opd
+tasks:
+  path: /srv/math/tasks.jsonl
+student:
+  kind: hf_local
+  checkpoint: /srv/models/student
+teacher:
+  kind: hf_local
+  checkpoint: /srv/models/teacher
+sampling:
+  max_new_tokens: 64
+  max_context: 512
+training:
+  steps: 2
+  batch_size: 2
+  microbatch_size: 1
+deployment:
+  device: cuda
+  world_size: 1
+output:
+  directory: /srv/runs/math-opd-new

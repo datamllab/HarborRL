@@ -1,0 +1,24 @@
+schema_version: 1
+backend_contract: transformers-math-onpolicy-v1
+method: opd
+tasks:
+  path: math.jsonl
+student:
+  kind: tiny_qwen
+teacher:
+  kind: fake
+prm:
+  kind: none
+sampling:
+  max_new_tokens: 8
+  max_context: 128
+training:
+  steps: 2
+  batch_size: 8
+  microbatch_size: 2
+  learning_rate: 0.0003
+deployment:
+  device: cpu
+  world_size: 1
+output:
+  directory: ../../runs/math-opd-smoke

@@ -24,6 +24,40 @@ def _deployment(plan):
 
 
 def doctor(plan):
+    if plan['config']['execution']['backend'] == 'text_math':
+        return _math_doctor(plan)
+    return _doctor(plan)
+
+
+def _math_doctor(plan):
+    """Use the shared backend probes without invoking Harbor task workers."""
+    config = plan['config']
+    from harborrl.math.data import load_tasks
+    checks = []
+    try:
+        rows = load_tasks(config['tasks']['path'])
+        checks.append({'service': 'locked math tasks', 'ok': True, 'count': len(rows)})
+    except (ValueError, OSError, TypeError) as exc:
+        checks.append({'service': 'locked math tasks', 'ok': False, 'detail': str(exc)})
+    if config['algorithm']['name'] == 'opd':
+        from harborrl.math.teacher import check
+        try:
+            check({**config['teacher'], 'identity': 'preflight'})
+            checks.append({'service': 'OPD teacher identity', 'ok': True,
+                           'detail': 'live model/version checked; checkpoint and tokenizer hashes freeze at launch'})
+        except (ValueError, OSError, TypeError) as exc:
+            checks.append({'service': 'OPD teacher identity', 'ok': False, 'detail': str(exc)})
+    if 'process_reward' in config:
+        from harborrl.math import prm
+        try:
+            prm.check(prm.freeze(config['process_reward']))
+            checks.append({'service': 'frozen PRM identity', 'ok': True})
+        except (ValueError, OSError, TypeError, KeyError) as exc:
+            checks.append({'service': 'frozen PRM identity', 'ok': False, 'detail': str(exc)})
+    return checks + _doctor(plan, math_only=True)
+
+
+def _doctor(plan, *, math_only=False):
     config = plan["config"]
     checks = []
     deployment = _deployment(plan)
@@ -45,10 +79,11 @@ def doctor(plan):
                           "by slime_train.sh at GPU job startup on the GPU machine",
             })
 
-    runner = Path(config["harbor"]["python"])
-    checks.append({"path": "harbor.python", "ok": runner.is_file()})
+    runner = Path(config.get("harbor", {}).get("python", '/nonexistent'))
+    if not math_only:
+        checks.append({"path": "harbor.python", "ok": runner.is_file()})
     from harborrl.rollout.harbor_job.coordinator import runner_command
-    if legacy_workers and runner.is_file():
+    if not math_only and legacy_workers and runner.is_file():
         workers = ([None] if config['harbor'].get('runner_transport') == 'local'
                    else config['harbor']['workers'])
         for worker in workers:
@@ -87,10 +122,16 @@ def doctor(plan):
                     checks.append({'service': 'sandbox offline runtime', 'worker': worker,
                                    'ok': False, 'detail': type(exc).__name__})
 
-    for key, path in (("tasks.catalog", config["tasks"]["catalog"]),
-                      ("harness.profile", config["harness"]["profile"]),
-                      ("model.checkpoint", config["model"]["checkpoint"]),
-                      ("model.reference", config["model"]["reference"])):
+    paths = [("model.checkpoint", config["model"]["checkpoint"]),
+             ("model.reference", config["model"]["reference"])]
+    if not math_only:
+        paths.extend([("tasks.catalog", config["tasks"]["catalog"]),
+                      ("harness.profile", config["harness"]["profile"])])
+    if config['training'].get('resume'):
+        paths.append(('training.resume', config['training']['resume']))
+    if math_only and config['algorithm']['name'] == 'opd':
+        paths.append(('teacher.checkpoint', config['teacher']['checkpoint']))
+    for key, path in paths:
         checks.append({"path": key, "ok": Path(path).exists()})
 
     model_config = Path(config["model"]["checkpoint"]) / "config.json"
@@ -108,7 +149,7 @@ def doctor(plan):
 
     from harborrl.tasks.catalog import catalog
     try:
-        entries = catalog(config)
+        entries = [] if math_only else catalog(config)
         for entry in entries:
             # catalog() already checks the complete task tree against its lock.
             checks.append({"task": entry["id"], "ok": True, "detail": []})
@@ -200,7 +241,18 @@ def doctor(plan):
 
     if config["training"]["backend_contract"] != "slime-legacy":
         from harborrl.backends.slime_v032.launcher import hook_modules
-        for hook_name, module_name in hook_modules().items():
+        modules = hook_modules()
+        if math_only:
+            modules.update(rollout='harborrl.backends.slime_v032.math_rollout',
+                           converter='harborrl.backends.slime_v032.math_rollout')
+            if config['algorithm']['name'] == 'opd':
+                modules.update(advantage='harborrl.backends.slime_v032.opd',
+                               loss='harborrl.backends.slime_v032.opd')
+            elif config['algorithm']['name'] == 'dapo':
+                modules.update(loss='harborrl.backends.slime_v032.dapo')
+            elif 'process_reward' in config:
+                modules.update(advantage='harborrl.backends.slime_v032.prm')
+        for hook_name, module_name in modules.items():
             try:
                 importlib.import_module(module_name)
                 checks.append({"service": "training backend hook", "hook": hook_name, "ok": True})
@@ -214,7 +266,7 @@ def doctor(plan):
         "service": "raw-model logprob audit",
         "ok": True,
         "detail": ("enabled by lock; live serving semantic probe remains a GPU gate"
-                   if config["gateway"]["audited_raw_logprobs"] else
+                   if math_only or config["gateway"]["audited_raw_logprobs"] else
                    "disabled; generated evidence remains EVAL_ONLY and training will fail closed"),
     })
     return checks

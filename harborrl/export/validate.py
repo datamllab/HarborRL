@@ -4,6 +4,8 @@ from __future__ import annotations
 import math
 
 from harborrl.export.contract import (
+    DAPO_REDUCTION,
+    OPD_REDUCTION,
     REDUCTION,
     SCHEMA_VERSION,
     TokenSpan,
@@ -58,6 +60,16 @@ def validate_token_span(span: TokenSpan):
     if any(not finite(value) or value > 0 for value in span.old_logprobs):
         raise ValueError("old logprobs must be finite and nonpositive")
     _nonempty_str(span.policy_version, "policy_version")
+    if span.process_rewards is not None:
+        from harborrl.export.contract import ProcessRewards
+        from harborrl.math.prm import token_returns
+        scores = span.process_rewards
+        if not isinstance(scores, ProcessRewards):
+            raise ValueError('process_rewards must be a ProcessRewards contract')
+        _nonempty_str(scores.identity, 'process reward identity')
+        expected = token_returns(scores.step_ends, scores.probabilities, span.response_length)
+        if tuple(expected) != scores.token_returns:
+            raise ValueError('PRM token returns differ from step reward-to-go')
 
 
 def validate_trajectory(unit: TrajectoryTrainingUnit):
@@ -83,7 +95,9 @@ def validate_trajectory(unit: TrajectoryTrainingUnit):
         raise ValueError("trajectory token count differs from its turns")
 
 
-def validate_group(group: TrainingGroup, *, epsilon=1e-6):
+def validate_group(group: TrainingGroup, *, epsilon=1e-6, algorithm="grpo"):
+    if algorithm not in ('grpo', 'opd', 'dapo'):
+        raise ValueError('unsupported group algorithm')
     _nonempty_str(group.group_key, "group_key")
     _plain_int(group.group_size, "group_size")
     if group.group_size < 2 or len(group.trajectories) != group.group_size:
@@ -105,10 +119,33 @@ def validate_group(group: TrainingGroup, *, epsilon=1e-6):
         raise ValueError("group reward mean differs from its trajectories")
     if not math.isclose(std, group.reward_std, rel_tol=1e-9, abs_tol=1e-9):
         raise ValueError("group reward std differs from its trajectories")
-    if group.reward_std == 0 and any(unit.advantage != 0.0 for unit in group.trajectories):
+    if algorithm == "grpo" and group.reward_std == 0 and any(unit.advantage != 0.0 for unit in group.trajectories):
         raise ValueError("zero-std groups must produce zero advantages")
     for unit in group.trajectories:
         validate_trajectory(unit)
+        if algorithm in ('grpo', 'dapo'):
+            expected = unit.reward - mean
+            if algorithm == 'dapo':
+                from harborrl.math.dapo import advantage
+                if std == 0:
+                    raise ValueError('DAPO requires a nonzero reward std')
+                expected = advantage(unit.reward, mean, std, group.group_size)
+            if not math.isclose(unit.advantage, expected, rel_tol=1e-9, abs_tol=1e-9):
+                if algorithm == 'dapo':
+                    raise ValueError('DAPO advantage must use complete-group sample std plus 1e-6')
+                raise ValueError("GRPO advantage must be centered without std normalization")
+            if any(span.teacher_logprobs is not None for span in unit.turns):
+                raise ValueError("Outcome policy gradients must not consume teacher scores")
+        else:
+            if unit.advantage != 0.0:
+                raise ValueError("OPD requires token scores, not a scalar reward advantage")
+            for span in unit.turns:
+                values = span.teacher_logprobs
+                if (values is None or len(values) != span.response_length
+                        or any(not finite(value) or value > 0 for value in values)):
+                    raise ValueError("OPD requires aligned finite teacher token logprobs")
+        if algorithm == 'dapo':
+            continue
         weight_sum = math.fsum(
             token_weight(group.group_size, unit.token_count) for span in unit.turns for _ in range(span.response_length)
         )
@@ -119,8 +156,17 @@ def validate_group(group: TrainingGroup, *, epsilon=1e-6):
 def validate_batch(batch: TrainingBatch, *, epsilon=1e-6):
     if batch.schema_version != SCHEMA_VERSION:
         raise ValueError(f"unsupported training batch schema: {batch.schema_version}")
-    if batch.reduction != REDUCTION:
+    reductions = {"grpo": REDUCTION, "opd": OPD_REDUCTION, "dapo": DAPO_REDUCTION}
+    if batch.algorithm not in reductions or batch.reduction != reductions[batch.algorithm]:
         raise ValueError(f"unsupported training reduction: {batch.reduction}")
+    if batch.algorithm == "opd":
+        _nonempty_str(batch.teacher_identity, "teacher_identity")
+    elif batch.teacher_identity is not None:
+        raise ValueError("Only OPD may declare a teacher")
+    if batch.process_reward_identity is not None:
+        _nonempty_str(batch.process_reward_identity, 'process_reward_identity')
+        if batch.algorithm != 'grpo':
+            raise ValueError('Process rewards currently require GRPO')
     if not batch.groups:
         raise ValueError("native training batch requires at least one group")
     if len(batch.policy_versions) != 1:
@@ -132,7 +178,16 @@ def validate_batch(batch: TrainingBatch, *, epsilon=1e-6):
     if len(set(rollout_ids)) != len(rollout_ids):
         raise ValueError("each native group needs a distinct rollout id")
     for group in batch.groups:
-        validate_group(group, epsilon=epsilon)
+        validate_group(group, epsilon=epsilon, algorithm=batch.algorithm)
+        for unit in group.trajectories:
+            scores = [span.process_rewards for span in unit.turns]
+            if batch.process_reward_identity is None:
+                if any(value is not None for value in scores):
+                    raise ValueError('PRM evidence requires a batch process_reward_identity')
+            elif (len(scores) != 1 or scores[0] is None
+                  or scores[0].identity != batch.process_reward_identity
+                  or not math.isclose(unit.reward, scores[0].token_returns[0], rel_tol=1e-9, abs_tol=1e-9)):
+                raise ValueError('PRM batch requires one aligned process reward source and matching total reward')
         versions = {span.policy_version for unit in group.trajectories for span in unit.turns}
         if versions != batch.policy_versions:
             raise ValueError("training batch mixes policy versions")
@@ -140,6 +195,9 @@ def validate_batch(batch: TrainingBatch, *, epsilon=1e-6):
 
 def batch_weight_sum(batch: TrainingBatch):
     """Sum of trajectory weights; each complete group contributes exactly one."""
+    if batch.algorithm == 'dapo':
+        validate_batch(batch)
+        return 1.0
     return math.fsum(
         token_weight(group.group_size, unit.token_count)
         for group in batch.groups

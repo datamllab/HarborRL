@@ -201,6 +201,7 @@ class SshTrainingTarget:
 def local_target(plan, *, environment):
     """Build the legacy in-process target from a resolved plan."""
     allowed = {"PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR", "LD_LIBRARY_PATH",
+               "LD_PRELOAD", "CUDA_HOME", "NVTE_CUDA_INCLUDE_DIR",
                "CUDA_VISIBLE_DEVICES", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
                "http_proxy", "https_proxy", "no_proxy", "PYTHONPATH",
                "SLIME_DIR", "MEGATRON_DIR", "SGLANG_IMAGE"}

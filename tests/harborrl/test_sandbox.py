@@ -13,6 +13,7 @@ from harborrl.rollout.harbor_job.sandbox_config import (
     load_sandbox,
     task_binding,
 )
+from harborrl.tasks.content import tree_digest
 
 
 def settings(tmp_path):
@@ -49,6 +50,47 @@ def test_sandbox_binding_and_secret_rejection(tmp_path):
     cfg['api_key'] = 'must-not-be-serialized'
     path.write_text(yaml.safe_dump(cfg))
     with pytest.raises(ValueError, match='fields'):
+        load_sandbox(path)
+
+
+def test_task_digest_binding_preserves_original_files_and_rejects_changes(tmp_path):
+    task = tmp_path / 'task'
+    task.mkdir()
+    (task / 'task.toml').write_text('[environment]\n')
+    (task / 'instruction.md').write_text('Original task.')
+    original = tree_digest(task)
+    cfg = settings(tmp_path)
+    cfg['bindings'][0]['task_digests'] = [original]
+    path = tmp_path / 'sandbox.yaml'
+    path.write_text(yaml.safe_dump(cfg))
+    config = load_sandbox(path)
+    assert task_binding(config, task)['image'] == cfg['bindings'][0]['image']
+    assert tree_digest(task) == original
+    (task / 'instruction.md').write_text('Changed task.')
+    with pytest.raises(ValueError, match='exact binding'):
+        task_binding(config, task)
+    (task / 'task.toml').write_text('[environment]\ndocker_image = "' + cfg['bindings'][0]['image'] + '"\n')
+    with pytest.raises(ValueError, match='exact binding'):
+        task_binding(config, task)
+
+
+@pytest.mark.parametrize('digests', [[], 'a' * 64, [1], ['invalid'], ['a' * 64, 'a' * 64]])
+def test_invalid_task_digest_bindings(tmp_path, digests):
+    cfg = settings(tmp_path)
+    cfg['bindings'][0]['task_digests'] = digests
+    path = tmp_path / 'sandbox.yaml'
+    path.write_text(yaml.safe_dump(cfg))
+    with pytest.raises(ValueError, match='digest'):
+        load_sandbox(path)
+
+
+def test_duplicate_task_digest_across_images(tmp_path):
+    cfg = settings(tmp_path)
+    cfg['bindings'][0]['task_digests'] = ['c' * 64]
+    cfg['bindings'].append({'image': 'other', 'max_live_instances': 1, 'task_digests': ['c' * 64]})
+    path = tmp_path / 'sandbox.yaml'
+    path.write_text(yaml.safe_dump(cfg))
+    with pytest.raises(ValueError, match='duplicate sandbox task digest'):
         load_sandbox(path)
 
 

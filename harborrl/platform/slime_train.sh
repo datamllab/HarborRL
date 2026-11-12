@@ -65,16 +65,18 @@ CKPT_ARGS=(
   --megatron-to-hf-mode bridge
   --save "${CKPT_ROOT}/${RUN_ID:-run}"
   --save-interval "${SAVE_INTERVAL}"
-  --no-save-optim
   --max-ckpt-keep "${MAX_CKPT_KEEP:-2}"
   --checkpoint-min-free-gb "${CHECKPOINT_MIN_FREE_GB:-128}"
   --checkpoint-expected-gb "${CHECKPOINT_EXPECTED_GB:-0}"
   --checkpoint-space-margin-ratio "${CHECKPOINT_SPACE_MARGIN_RATIO:-1.15}"
 )
 if [[ -n "${RESUME_LOAD:-}" ]]; then
-  CKPT_ARGS+=(--load "${RESUME_LOAD}" --no-load-optim)
+  CKPT_ARGS+=(--load "${RESUME_LOAD}" --use-checkpoint-opt-param-scheduler)
 else
   CKPT_ARGS+=(--load "${HF_CKPT}")
+fi
+if [[ -n "${SAVE_HF:-}" ]]; then
+  CKPT_ARGS+=(--save-hf "${SAVE_HF}")
 fi
 
 DATA_ARGS=(
@@ -146,9 +148,6 @@ PARALLEL_ARGS=(
   --attention-backend flash
   --no-gradient-accumulation-fusion
 )
-if [[ "${HARBORRL_GPU_LAYOUT:-split}" == "colocate" ]]; then
-  PARALLEL_ARGS+=(--colocate)
-fi
 
 CUSTOM_ARGS=(
   --rollout-function-path harborrl.backends.slime_v032.rollout.generate_rollout
@@ -158,6 +157,45 @@ CUSTOM_ARGS=(
   --custom-loss-function-path harborrl.backends.slime_v032.loss.loss_function
   --rollout-data-postprocess-path harborrl.backends.slime_v032.postprocess.rollout_data_postprocess
 )
+TRAINING_SEED="${HARBORRL_TRAINING_SEED:-${HARBORRL_MATH_SEED:-}}"
+if [[ -n "${TRAINING_SEED}" ]]; then
+  [[ "${TRAINING_SEED}" =~ ^[0-9]+$ && ${#TRAINING_SEED} -le 10 ]] || die "training seed must be an integer in 0..2147483647"
+  (( 10#${TRAINING_SEED} <= 2147483647 )) || die "training seed must be an integer in 0..2147483647"
+  DATA_ARGS+=(--seed "${TRAINING_SEED}" --rollout-seed "${TRAINING_SEED}"
+              --sglang-enable-deterministic-inference)
+fi
+if [[ "${HARBORRL_EXECUTION_BACKEND:-harbor_job}" == "text_math" ]]; then
+  ADVANTAGE_MODULE=harborrl.backends.slime_v032.advantage
+  LOSS_MODULE=harborrl.backends.slime_v032.loss
+  case "${HARBORRL_MATH_ALGORITHM:-grpo}" in
+    grpo) ;;
+    dapo)
+      : "${HARBORRL_DAPO:?DAPO requires explicit settings}"
+      LOSS_MODULE=harborrl.backends.slime_v032.dapo
+      mapfile -t DAPO_CLIP < <("${TRAIN_PYTHON:-python3}" -c \
+        'import json,os; c=json.loads(os.environ["HARBORRL_DAPO"]); print(c["clip_low"]); print(c["clip_high"])')
+      OPT_ARGS+=(--calculate-per-token-loss --eps-clip "${DAPO_CLIP[0]}" --eps-clip-high "${DAPO_CLIP[1]}")
+      ;;
+    opd)
+      : "${HARBORRL_OPD_TEACHER:?OPD requires a frozen teacher manifest}"
+      ADVANTAGE_MODULE=harborrl.backends.slime_v032.opd
+      LOSS_MODULE=harborrl.backends.slime_v032.opd
+      ;;
+    *) die "Unsupported math algorithm: ${HARBORRL_MATH_ALGORITHM}" ;;
+  esac
+  if [[ -n "${HARBORRL_PROCESS_REWARD:-}" ]]; then
+    [[ "${HARBORRL_MATH_ALGORITHM:-grpo}" == "grpo" ]] || die "PRM currently requires GRPO"
+    ADVANTAGE_MODULE=harborrl.backends.slime_v032.prm
+  fi
+  CUSTOM_ARGS=(
+    --rollout-function-path harborrl.backends.slime_v032.math_rollout.generate_rollout
+    --custom-convert-samples-to-train-data-path harborrl.backends.slime_v032.math_rollout.convert_samples_to_train_data
+    --custom-advantage-function-path "${ADVANTAGE_MODULE}.compute_advantages_and_returns"
+    --loss-type custom_loss
+    --custom-loss-function-path "${LOSS_MODULE}.loss_function"
+    --rollout-data-postprocess-path harborrl.backends.slime_v032.postprocess.rollout_data_postprocess
+  )
+fi
 if [[ -f "${RUN_DIR}/config/rollout_config.yaml" ]]; then
   CUSTOM_ARGS+=(--custom-config-path "${RUN_DIR}/config/rollout_config.yaml")
 fi

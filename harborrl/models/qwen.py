@@ -36,4 +36,4 @@ class QwenModelAdapter:
         return token_ids
 
     def parse_output(self, text, *, response_id, tools):
-        return parse_qwen_output(text, response_id=response_id, tools=tools)
+        return parse_qwen_output(text, response_id=response_id, tools=tools, allow_unknown_tools=True)

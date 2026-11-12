@@ -15,12 +15,12 @@ FIELDS = {
     'harbor': {'python', 'version', 'workers', 'runner_transport', 'environment'},
     'gateway': {'host', 'port', 'advertised_url', 'tokenizer_digest', 'template_digest', 'audited_raw_logprobs'},
     'model': {'checkpoint', 'reference', 'args_file'},
-    'training': {'num_rollout', 'learning_rate', 'save_interval', 'backend_contract'},
+    'training': {'num_rollout', 'learning_rate', 'save_interval', 'backend_contract', 'seed', 'export_hf'},
     'sampling': {'group_size', 'groups_per_batch', 'max_attempts', 'max_tokens', 'max_context'},
     'deployment': {'layout', 'num_gpus', 'actor_gpus', 'rollout_gpus', 'actor_tensor_parallel_size', 'rollout_gpus_per_engine'},
     'output': {'root'},
 }
-OPTIONAL = {'harbor': {'runner_transport', 'environment'}}
+OPTIONAL = {'harbor': {'runner_transport', 'environment'}, 'training': {'seed', 'export_hf'}}
 
 
 class SelectedConfig(dict):
@@ -40,6 +40,9 @@ def load_config(path, overrides=None, task_ids=None):
         raise TypeError('configuration must be a mapping')
     if config.get('schema_version') != 2:
         raise ValueError('native configuration requires schema_version: 2')
+    if config.get('execution', {}).get('backend') == 'text_math':
+        from harborrl.math.config import load_config as load_math_config
+        return load_math_config(config, path, overrides, task_ids)
     validate(config, path)
     for override in overrides or ():
         key, separator, value = override.partition('=')
@@ -73,6 +76,7 @@ def validate(config, path):
         raise TypeError('training must be a mapping')
     config['training'].setdefault(
         'backend_contract', 'slime-v0.3.2-native-v1')
+    config['training'].setdefault('export_hf', False)
     for section, fields in FIELDS.items():
         actual = set(config[section]) if isinstance(config[section], dict) else set()
         if not isinstance(config[section], dict) or not fields - OPTIONAL.get(section, set()) <= actual <= fields:
@@ -97,6 +101,11 @@ def validate(config, path):
         raise ValueError(f"training.backend_contract must be one of {sorted(CONFIG_CONTRACTS)}")
     if not finite(config['training']['learning_rate']) or config['training']['learning_rate'] <= 0:
         raise ValueError('training.learning_rate must be positive and finite')
+    seed = config['training'].get('seed')
+    if seed is not None and (type(seed) is not int or not 0 <= seed < 2**31):
+        raise ValueError('training.seed must be null or an integer in 0..2147483647')
+    if type(config['training']['export_hf']) is not bool:
+        raise ValueError('training.export_hf must be a boolean')
     g, d, s = config['gateway'], config['deployment'], config['sampling']
     if type(g['audited_raw_logprobs']) is not bool or not 0 < g['port'] < 65536:
         raise ValueError('gateway.audited_raw_logprobs must be boolean and gateway.port must be in 1..65535')
@@ -177,5 +186,8 @@ def catalog(config):
 
 def launch_plan(config):
     """Compatibility entry point for backend launch mapping."""
+    if config['execution']['backend'] == 'text_math':
+        from harborrl.math.config import launch_plan as build_math_plan
+        return build_math_plan(config)
     from harborrl.backends.slime_v032.config import launch_plan as build_plan
     return build_plan(config)

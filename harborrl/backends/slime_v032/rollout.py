@@ -16,10 +16,10 @@ from harborrl.backends.slime_v032.versions import lock_policy_version
 from harborrl.export.native import export_training_batch
 from harborrl.rollout.runtime import (
     RolloutRuntimeConfig,
+    cancel_and_wait,
+    close_runtime,
     current_policy_version,
     digest,
-    gather_or_cancel,
-    run_embedded,
     run_group,
     runtime,
     task_entry,
@@ -197,8 +197,23 @@ async def run_native_groups(args, groups, policy_version, rollout_id):
         ir_groups = await run_service_groups(args, groups, rollout_id)
         assert_locked_policy_versions(ir_groups, policy_version)
         return ir_groups
-    results = await gather_or_cancel(
-        generate_group(args, group, params, rollout_id=rollout_id) for group in groups)
+    pending = [asyncio.create_task(
+        generate_group(args, group, params, rollout_id=rollout_id)) for group in groups]
+    batch = asyncio.gather(*pending)
+    try:
+        # Keep parent cancellation from being forwarded twice during cleanup.
+        results = await asyncio.shield(batch)
+    except BaseException:
+        # Groups own their slot cleanup; finish it before shutting down the gateway.
+        await cancel_and_wait(pending, batch)
+        # Close the cached runtime here unless an embedded run owns the loop:
+        # run_embedded's failure handler closes it after the loop unwinds, so
+        # the original error is what propagates.
+        from harborrl.rollout import runtime as _runtime
+        loop = getattr(_runtime, "_EMBEDDED_LOOP", None)
+        if not (loop is not None and loop.is_running()):
+            close_runtime()
+        raise
     ir_groups = []
     for group in results:
         trajectories = []
@@ -306,7 +321,7 @@ def generate_rollout(
     if runner is None:
         async def runner(args_, groups_, policy_version):
             return await run_native_groups(args_, groups_, policy_version, rollout_id)
-    ir_groups = run_embedded(runner(args, groups, None))
+    ir_groups = asyncio.run(runner(args, groups, None))
     policy_version = lock_policy_version(args)
     assert_locked_policy_versions(ir_groups, policy_version)
     batch = export_training_batch(

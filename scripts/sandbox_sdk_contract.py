@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
+from harbor.models.task.config import EnvironmentConfig
 from harbor.models.trial.config import TrialConfig
 from opensandbox import Sandbox
 
@@ -19,6 +20,25 @@ sdk = ManagedOpenSandboxEnvironment._load_opensandbox(None)
 assert {'extensions', 'skip_health_check', 'ready_timeout'} <= inspect.signature(Sandbox.create).parameters.keys()
 assert 'import_path' in TrialConfig.model_fields['environment'].annotation.model_fields
 assert not inspect.isabstract(OfflineClaudeCode)
+
+with tempfile.TemporaryDirectory() as directory:
+    task_dir = Path(directory)
+    (task_dir / 'Dockerfile').write_text('FROM example/original\n')
+    config = EnvironmentConfig()
+    env = object.__new__(ManagedOpenSandboxEnvironment)
+    env.environment_dir = task_dir
+    env.task_env_config = config
+    env.binding = {'image': 'example/built@sha256:' + 'a' * 64}
+    env._validate_definition()
+    assert config.docker_image is None
+    assert env.task_env_config.docker_image == env.binding['image']
+    (task_dir / 'docker-compose.yaml').write_text('services: {}\n')
+    try:
+        env._validate_definition()
+    except ValueError as exc:
+        assert 'docker-compose' in str(exc)
+    else:
+        raise AssertionError('compose tasks must still be rejected')
 
 
 async def cleanup_contract():

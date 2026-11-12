@@ -5,7 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from harborrl.rollout.harbor_job.audit import audit_session
+from harborrl.rollout.harbor_job.audit import audit_session, audit_termination
 from harborrl.rollout.harbor_job.bindings import (
     claude_config,
     sanitized_runner_env,
@@ -24,8 +24,11 @@ class ClaudeCodeHarnessAdapter:
     def runner_environment(self, environment):
         return sanitized_runner_env(environment)
 
-    def audit_session(self, path, registry, attempt_id):
-        return audit_session(path, registry, attempt_id)
+    def audit_session(self, path, registry, attempt_id, *, cli_version=None):
+        return audit_session(path, registry, attempt_id, cli_version=cli_version)
+
+    def audit_termination(self, path, result_path, profile, audit, *, turns):
+        return audit_termination(path, result_path, profile, audit, turns=turns)
 
     def audit_empty_final(self, path, registry, attempt_id, audit):
         """Claude 2.1.141 omits empty final messages from persisted sessions."""

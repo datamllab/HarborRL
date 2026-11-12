@@ -25,9 +25,11 @@
 
 ## News
 
-- **2026-10-26** 新增[离线配置向导](docs/configuration-wizard.md)和[本地 Web 控制台](docs/web-console.md)，支持配置、校验、dry-run、训练启动和日志查看。
-- **2026-10-26** 新增 [controller/GPU 部署配置](docs/deployment.md)、可选的 [OpenSandbox 执行能力](docs/sandbox-rollout.md)，以及按需启用的[训练与推理一致性检查](docs/train-inference-consistency.md)。
-- **10/2026** 📣📣📣 HarborRL released
+- **2026-11-12** 新增[网关水平分片](docs/deployment.md)：静态路由、弹性自动生长（远端优先）与自动缩容。
+- **2026-11-12** 新增 [Hub 部署模式](docs/deployment.md)：适配单向网络集群，节点经 HTTP 拉取任务，无需跨机 SSH。
+- **2026-11-12** 新增[在线数学训练](docs/math-distill.md)（GRPO、DAPO、过程奖励、OPD、PRM 蒸馏），统一接入 Slime/Megatron + SGLang 管线。
+- **2026-11-12** 新增[配置向导](docs/configuration-wizard.md)、[Web 控制台](docs/web-console.md)与带审计清理的 [Sandbox 执行](docs/sandbox-rollout.md)。
+- **2026-11-12** 10/2026 📣 HarborRL 发布
 
 ## 项目介绍
 
@@ -46,12 +48,8 @@ HarborRL 支持 **Models × Algorithms × Tasks × Harnesses (MATH)** 的灵活�
 [docs/agents/environment-check.md](docs/agents/environment-check.md)。
 
 离线选项目录、交互式配置和 answer-file 配置方式见[配置 CLI 指南](docs/configuration-wizard.md)。
-首次使用可以先运行 `harborrl hello`：无需模型、GPU 或已有 task JSON，
-即可执行脚本任务、真实 verifier、0/1 奖励收集和使用示例 token 的 GRPO batch 导出。
-接着使用 `harborrl options` 或 `harborrl init --help`。Local 模式会检测并共用
-一套源码目录与 Python；模型指纹自动计算，未填完的草稿支持 `:save` 保存和 `--resume` 恢复。
-运行 `harborrl web` 可打开浏览器控制台，查看或套用 Local／Sandbox 示例、
-随时保存草稿、一键运行 Hello World，并完成校验、dry-run、训练启动和日志查看；
+可以从 `harborrl options` 或 `harborrl init --help` 开始。
+运行 `harborrl web` 可打开本地浏览器控制台，完成配置、校验、dry-run、训练启动和日志查看；
 远程访问与生命周期说明见 [Web 控制台指南](docs/web-console.md)。
 
 推荐的实际操作流程是把下面这段提示词交给 agent，并把尖括号内容替换成你的机器信息：
@@ -112,13 +110,9 @@ uv run pytest
 如需原生训练，请把固定版本的 native 训练栈安装到可写位置：
 
 ```bash
-bash scripts/bootstrap_backends.sh "<Path to HarborRL backends>"
-. "<Path to HarborRL backends>/harborrl-backend.env"
+bash scripts/bootstrap_backends.sh <Path to HarborRL backends>
+. <Path to HarborRL backends>/harborrl-backend.env
 ```
-
-生成的文件会将 `SLIME_DIR`、`MEGATRON_DIR` 和 `SGLANG_IMAGE` 导出给子进程。
-对于旧版 bootstrap 脚本生成的文件，请在 source 前执行 `set -a`，之后执行 `set +a`。
-清理标记的恢复步骤和无 GPU 回归命令见[rollout 生命周期与恢复](docs/rollout-runtime-lifecycle.md)。
 
 ### 训练
 
@@ -158,11 +152,7 @@ task/
 
 其中 `task.toml` 声明资源、agent 与 verifier，`instruction.md` 是给 agent 的任务说明，`environment/Dockerfile` 构建隔离执行环境，`tests/test.sh` 负责验证并输出 `reward.json` 或 `reward.txt`。训练时，这些任务会被锁定到 catalog 中，记录任务 ID、上游 revision、本地路径、内容 digest 和 reward 解析规则；示例见 [examples/native/catalog.json](examples/native/catalog.json)。
 
-仓库内置的可直接运行示例是 `hello_world`。示例允许联网，以便 Harbor 安装固定版本的 Claude Code CLI；内存与存储各配置 4 GiB，verifier 将 0/1 奖励写入 `/logs/verifier/reward.json`。profile 允许四轮交互，供 agent 执行工具、读取结果并正常结束。离线部署需要预装完全一致的 CLI 版本，并确保能够访问 policy gateway。修改任务内容后，需要重新生成 catalog 中的内容摘要。
-
-示例固定使用经过运行验证的 Claude Code `2.1.141`。adapter 默认关闭 prompt caching 及缓存预热、上下文压缩和非必要流量；自定义工具禁用列表也会保留 `Agent` 和 `Task`。CLI `2.1.0` 在 Bash 执行后仍会发起独立的文件路径提取请求，不符合单上下文 rollout 契约。使用其他 CLI 版本前需要重新验证；原生会话审计会拒绝辅助上下文、摘要和未消费的模型响应。
-
-实际训练任务不由本 repo 重新打包，而是从 Harbor Hub 获取符合 Harbor native task 格式的 dataset/task；可先查看[兼容性汇总](configs/harbor_hub/public_compatibility_summary_zh.md)了解已验证覆盖情况。取回 task root 后，先用 `harborrl hub inspect` 做本地静态校验，再锁定进自己的 catalog。
+仓库内置的可直接运行示例是 `hello_world`。实际训练任务不由本 repo 重新打包，而是从 Harbor Hub 获取符合 Harbor native task 格式的 dataset/task；可先查看[兼容性汇总](configs/harbor_hub/public_compatibility_summary_zh.md)了解已验证覆盖情况。取回 task root 后，先用 `harborrl hub inspect` 做本地静态校验，再锁定进自己的 catalog。
 
 ## License
 

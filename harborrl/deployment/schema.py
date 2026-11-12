@@ -9,6 +9,7 @@ agent or a restricted identity file.
 from __future__ import annotations
 
 import re
+import shlex
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -23,10 +24,23 @@ DEPLOYMENT_SECTIONS = {"manager", "gpu_target", "storage", "rollout", "connectiv
 SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "[::1]"}
 
-MANAGER_FIELDS = {"id", "mode", "bind", "control_port", "control_url", "gateway_port",
-                  "gateway_url", "run_token_file", "source_dir", "controller_python"}
+MANAGER_REQUIRED = {"id", "mode", "bind", "control_port", "control_url", "gateway_port",
+                    "gateway_url", "run_token_file", "source_dir", "controller_python"}
+MANAGER_OPTIONAL = {"gateway_shards", "gateway_routing", "sandboxes_per_shard",
+                    "worker_shards", "gateway_hosts", "shard_python"}
+MANAGER_FIELDS = MANAGER_REQUIRED | MANAGER_OPTIONAL
+SHARD_FIELDS = {"name", "port", "mode", "url", "admin_url"}
+SHARD_MODES = ("local", "remote")
+SHARD_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
+GATEWAY_ROUTINGS = ("modulo", "worker_affinity", "auto")
+DEFAULT_SANDBOXES_PER_SHARD = 30
 SSH_FIELDS = {"host", "user", "port", "identity"}
-GPU_FIELDS = {"id", "transport", "ssh", "source_dir", "train_python", "environment_file", "expected_gpus"}
+GPU_REQUIRED = {"id", "transport", "ssh", "source_dir", "train_python", "environment_file",
+                "expected_gpus"}
+GPU_OPTIONAL = {"provision"}
+GPU_FIELDS = GPU_REQUIRED | GPU_OPTIONAL
+PROVISION_FIELDS = {"up", "down", "timeout_s"}
+DEFAULT_PROVISION_TIMEOUT_S = 900
 STORAGE_FIELDS = {"mode", "run_root", "manager_writable", "gpu_writable", "worker_writable"}
 WORKER_FIELDS = {"id", "ssh", "source_dir", "runner_python", "docker", "task_roots"}
 ROLLOUT_FIELDS = {"provider", "workers"}
@@ -123,9 +137,88 @@ def destination(spec):
     return f"{spec['user']}@{spec['host']}" if spec.get("user") else spec["host"]
 
 
+def _growth_host(value, label):
+    """Validate one growth-pool entry, preserving its declared spelling.
+
+    A plain string is an ssh destination that inherits every transport option
+    from the invoking user's ssh config — the historical form, kept byte for
+    byte so legacy digests do not move. A mapping narrows those options for
+    an ephemeral machine whose port and identity are known per run rather
+    than in the config file.
+    """
+    if isinstance(value, str):
+        if (not value.strip() or any(character.isspace() for character in value)
+                or value.startswith("-") or value.count("@") > 1):
+            raise DeploymentError(f"{label} must be an ssh destination (user@host)")
+        return value
+    if not isinstance(value, dict) or set(value) - SSH_FIELDS or "host" not in value:
+        raise DeploymentError(
+            f"{label} requires at most {sorted(SSH_FIELDS)} and a host")
+    return _ssh_spec(value, label)
+
+
+def _growth_key(entry):
+    """The identity used for duplicate detection across both entry forms."""
+    return destination(entry) if isinstance(entry, dict) else entry
+
+
+def _gateway_shards(value, control_port, *, service):
+    """Normalize manager.gateway_shards; absent keeps the legacy single gateway."""
+    if value is None:
+        return None
+    if not isinstance(value, list) or not value:
+        raise DeploymentError("manager.gateway_shards must be a nonempty list")
+    shards, names, ports = [], set(), set()
+    for entry in value:
+        if not isinstance(entry, dict) or set(entry) - SHARD_FIELDS or "name" not in entry:
+            raise DeploymentError(
+                f"manager.gateway_shards entries require at most {sorted(SHARD_FIELDS)} and a name")
+        name = entry["name"]
+        if not isinstance(name, str) or not SHARD_NAME.fullmatch(name):
+            raise DeploymentError("manager.gateway_shards names are lowercase slugs")
+        mode = entry.get("mode", "local")
+        if mode not in SHARD_MODES:
+            raise DeploymentError(f"manager.gateway_shards mode must be one of {SHARD_MODES}")
+        shard = {"name": name}
+        if mode == "remote":
+            if not service:
+                raise DeploymentError(
+                    "remote gateway shards require a service-mode manager")
+            if "port" in entry:
+                raise DeploymentError("a remote gateway shard takes its port from url")
+            shard["mode"] = "remote"
+            # A remote shard may bind on a hub loopback when reached through a
+            # reverse tunnel: the forward onto 127.0.0.1:N is the real route.
+            shard["url"] = _plain_origin(entry.get("url"), "manager.gateway_shards url",
+                                         allow_loopback=True)
+            shard["admin_url"] = _plain_origin(entry.get("admin_url"),
+                                               "manager.gateway_shards admin_url",
+                                               allow_loopback=True)
+        else:
+            if "url" in entry or "admin_url" in entry:
+                raise DeploymentError("a local gateway shard binds a port and derives its url")
+            port = entry.get("port")
+            if port is not None:
+                port = _positive_int(port, "manager.gateway_shards port")
+                if port == control_port:
+                    raise DeploymentError("manager.gateway_shards port collides with control_port")
+                if port in ports:
+                    raise DeploymentError(f"duplicate gateway shard port: {port}")
+                ports.add(port)
+                shard["port"] = port
+        if name in names:
+            raise DeploymentError(f"duplicate gateway shard name: {name}")
+        names.add(name)
+        shards.append(shard)
+    return shards
+
+
 def _manager(config):
-    if not isinstance(config, dict) or set(config) != MANAGER_FIELDS:
-        raise DeploymentError(f"manager requires exactly {sorted(MANAGER_FIELDS)}")
+    if not isinstance(config, dict) or set(config) - MANAGER_FIELDS:
+        raise DeploymentError(f"manager supports only {sorted(MANAGER_FIELDS)}")
+    missing = MANAGER_REQUIRED - set(config)
+    if missing:
+        raise DeploymentError(f"manager requires {sorted(missing)}")
     mode = config["mode"]
     if mode not in ("embedded", "service"):
         raise DeploymentError("manager.mode must be embedded or service")
@@ -140,7 +233,65 @@ def _manager(config):
                                 port=control_port, allow_loopback=not service)
     gateway_url = _plain_origin(config["gateway_url"], "manager.gateway_url",
                                 port=gateway_port, allow_loopback=not service)
-    return {
+    routing = config.get("gateway_routing", "modulo")
+    if routing not in GATEWAY_ROUTINGS:
+        raise DeploymentError(f"manager.gateway_routing must be one of {GATEWAY_ROUTINGS}")
+    shards = _gateway_shards(config.get("gateway_shards"), control_port, service=service)
+    # A static table and elastic growth may coexist: declared shards exist
+    # from startup (a long-lived host served through a tunnel), and auto
+    # routing grows beyond them when concurrency passes the per-shard budget.
+    sandboxes_per_shard = config.get("sandboxes_per_shard", DEFAULT_SANDBOXES_PER_SHARD)
+    if type(sandboxes_per_shard) is not int or sandboxes_per_shard < 1:
+        raise DeploymentError(
+            "manager.sandboxes_per_shard must be a positive integer (default "
+            f"{DEFAULT_SANDBOXES_PER_SHARD} sandboxes per gateway)")
+    worker_shards = config.get("worker_shards")
+    if worker_shards is not None:
+        if shards is None:
+            raise DeploymentError("manager.worker_shards requires manager.gateway_shards")
+        if (not isinstance(worker_shards, dict)
+                or not all(isinstance(key, str) and key.strip()
+                           and isinstance(value, str) and value.strip()
+                           for key, value in worker_shards.items())):
+            raise DeploymentError(
+                "manager.worker_shards maps worker ids (or 'local') to gateway shard names")
+    gateway_hosts = config.get("gateway_hosts")
+    if gateway_hosts is not None:
+        if not service:
+            raise DeploymentError(
+                "manager.gateway_hosts grows remote shards on a service-mode manager")
+        if not isinstance(gateway_hosts, list) or not gateway_hosts:
+            raise DeploymentError(
+                "manager.gateway_hosts is a nonempty list of ssh destinations (user@host)")
+        normalized_hosts = []
+        for index, entry in enumerate(gateway_hosts):
+            if (isinstance(entry, str) and entry.strip()
+                    and not any(character.isspace() for character in entry)):
+                normalized_hosts.append(entry)
+            elif isinstance(entry, dict):
+                normalized_hosts.append(
+                    _growth_host(entry, f"manager.gateway_hosts[{index}]"))
+            else:
+                # Historical wording: a malformed string entry is still a
+                # missing destination, not a new option form.
+                raise DeploymentError(
+                    "manager.gateway_hosts is a nonempty list of ssh destinations (user@host)")
+        gateway_hosts = normalized_hosts
+        if len({_growth_key(entry) for entry in gateway_hosts}) != len(gateway_hosts):
+            raise DeploymentError("manager.gateway_hosts entries must be unique")
+        if config.get("gateway_routing") in ("modulo", "worker_affinity"):
+            # An undeclared routing keeps the runtime's elastic auto default;
+            # only an explicit static routing refuses the growth pool.
+            raise DeploymentError(
+                "manager.gateway_hosts grows gateways under auto routing")
+    shard_python = config.get("shard_python")
+    if shard_python is not None:
+        if gateway_hosts is None:
+            raise DeploymentError(
+                "manager.shard_python interprets gateway_hosts growth; "
+                "declare the pool first")
+        shard_python = _absolute_path(shard_python, "manager.shard_python")
+    manager = {
         "id": _slug(config["id"], "manager.id"), "mode": mode,
         "bind": _nonempty_str(config["bind"], "manager.bind"),
         "control_port": control_port, "control_url": control_url,
@@ -149,17 +300,96 @@ def _manager(config):
         "source_dir": _absolute_path(config["source_dir"], "manager.source_dir"),
         "controller_python": _absolute_path(config["controller_python"], "manager.controller_python"),
     }
+    # Shard keys appear only when sharding is declared, so legacy deployments
+    # keep their exact historical shape (and digest). An explicitly declared
+    # routing without shards opts in or out of auto growth; undeclared means
+    # the runtime's elastic default (one gateway until sandboxes_per_shard).
+    if shards is not None:
+        manager["gateway_shards"] = shards
+        # A declared table pins the historical static default, unless the
+        # growth pool asks auto routing to expand beyond it.
+        manager["gateway_routing"] = (
+            "auto" if gateway_hosts is not None and "gateway_routing" not in config
+            else routing)
+        if worker_shards is not None:
+            manager["worker_shards"] = dict(worker_shards)
+    elif gateway_hosts is not None:
+        # The pool is meaningless without growth; never let the runtime see a
+        # static routing that it would reject after the GPU job is submitted.
+        manager["gateway_routing"] = "auto"
+    elif "gateway_routing" in config:
+        manager["gateway_routing"] = routing
+    if "sandboxes_per_shard" in config:
+        manager["sandboxes_per_shard"] = sandboxes_per_shard
+    if gateway_hosts is not None:
+        # Auto growth fills this pool before falling back to the manager
+        # machine; the entry spelling is the URL host runners will use.
+        manager["gateway_hosts"] = list(gateway_hosts)
+        if shard_python is not None:
+            manager["shard_python"] = shard_python
+    return manager
+
+
+def _command(value, label):
+    """A provision command: an argv list, or a string split without a shell."""
+    if isinstance(value, str):
+        parts = shlex.split(value)
+        if not parts:
+            raise DeploymentError(f"{label} must be a nonempty command")
+        return parts
+    if (not isinstance(value, list) or not value
+            or not all(isinstance(part, str) and part for part in value)):
+        raise DeploymentError(f"{label} must be a nonempty argv list of strings")
+    return list(value)
+
+
+def _provision(value):
+    """Normalize gpu_target.provision: how a dispatch obtains its GPU machine.
+
+    The commands are opaque to the core: ``up`` prints one JSON object naming
+    the machine it produced, ``down`` releases it. Nothing site-specific is
+    interpreted here, and no secret belongs in either command.
+    """
+    if (not isinstance(value, dict) or set(value) - PROVISION_FIELDS
+            or "up" not in value):
+        raise DeploymentError(
+            f"gpu_target.provision supports {sorted(PROVISION_FIELDS)} and requires up")
+    provision = {"up": _command(value["up"], "gpu_target.provision.up")}
+    down = value.get("down")
+    if down is not None:
+        provision["down"] = _command(down, "gpu_target.provision.down")
+    provision["timeout_s"] = _positive_int(
+        value.get("timeout_s", DEFAULT_PROVISION_TIMEOUT_S),
+        "gpu_target.provision.timeout_s")
+    return provision
 
 
 def _gpu_target(config):
-    if not isinstance(config, dict) or set(config) != GPU_FIELDS:
-        raise DeploymentError(f"gpu_target requires exactly {sorted(GPU_FIELDS)}")
+    if (not isinstance(config, dict) or set(config) - GPU_FIELDS
+            or GPU_REQUIRED - set(config)):
+        raise DeploymentError(
+            f"gpu_target requires {sorted(GPU_REQUIRED)} and supports at most "
+            f"{sorted(GPU_FIELDS)}")
     transport = config["transport"]
     if transport not in TRANSPORTS:
         raise DeploymentError(f"gpu_target.transport must be one of {TRANSPORTS}")
+    provision = config.get("provision")
+    if provision is not None:
+        # A provisioned machine is reached over ssh; a local target already
+        # exists and has nothing to obtain or release.
+        if transport != "ssh":
+            raise DeploymentError("gpu_target.provision requires ssh transport")
+        if config["ssh"] is not None:
+            raise DeploymentError(
+                "gpu_target.provision supplies the machine; declare no gpu_target.ssh")
+        provision = _provision(provision)
     ssh = config["ssh"]
     if transport == "ssh":
-        ssh = _ssh_spec(ssh, "gpu_target.ssh")
+        if ssh is None and provision is None:
+            raise DeploymentError(
+                "gpu_target.ssh is required unless gpu_target.provision supplies the machine")
+        if ssh is not None:
+            ssh = _ssh_spec(ssh, "gpu_target.ssh")
     elif ssh is not None:
         raise DeploymentError("gpu_target.ssh must be null for local transport")
     target = {
@@ -171,6 +401,8 @@ def _gpu_target(config):
     environment_file = config["environment_file"]
     if environment_file is not None:
         target["environment_file"] = _absolute_path(environment_file, "gpu_target.environment_file")
+    if provision is not None:
+        target["provision"] = provision
     return target
 
 
@@ -235,6 +467,29 @@ def _connectivity(config):
     }
 
 
+def _check_gateway_shard_routing(manager, raw_manager, rollout):
+    """Static routing must be total before dispatch, not discovered mid-run."""
+    declared_routing = raw_manager.get("gateway_routing", "modulo")
+    shards = manager.get("gateway_shards")
+    worker_shards = manager.get("worker_shards") or {}
+    if declared_routing == "worker_affinity" and not shards:
+        raise DeploymentError("worker_affinity routing requires manager.gateway_shards")
+    worker_ids = {worker["id"] for worker in rollout["workers"]}
+    if declared_routing == "worker_affinity":
+        missing = sorted(worker_ids - set(worker_shards))
+        if missing:
+            raise DeploymentError(
+                f"worker_affinity requires a shard for every rollout worker; missing {missing}")
+    if not worker_shards:
+        return
+    unknown_keys = sorted(set(worker_shards) - worker_ids - {"local"})
+    if unknown_keys:
+        raise DeploymentError(f"manager.worker_shards names unknown workers {unknown_keys}")
+    unknown_shards = sorted(set(worker_shards.values()) - {shard["name"] for shard in shards})
+    if unknown_shards:
+        raise DeploymentError(f"manager.worker_shards names unknown shards {unknown_shards}")
+
+
 def validate(config):
     """Strictly validate and normalize a deployment mapping."""
     if not isinstance(config, dict):
@@ -245,12 +500,15 @@ def validate(config):
             + ", ".join(sorted(DEPLOYMENT_SECTIONS)))
     if config["schema_version"] != DEPLOYMENT_SCHEMA_VERSION or type(config["schema_version"]) is not int:
         raise DeploymentError(f"deployment schema_version must be {DEPLOYMENT_SCHEMA_VERSION}")
+    manager = _manager(config["manager"])
+    rollout = _rollout(config["rollout"])
+    _check_gateway_shard_routing(manager, config["manager"], rollout)
     return {
         "schema_version": DEPLOYMENT_SCHEMA_VERSION,
-        "manager": _manager(config["manager"]),
+        "manager": manager,
         "gpu_target": _gpu_target(config["gpu_target"]),
         "storage": _storage(config["storage"]),
-        "rollout": _rollout(config["rollout"]),
+        "rollout": rollout,
         "connectivity": _connectivity(config["connectivity"]),
     }
 

@@ -87,6 +87,22 @@ def test_schema2_launch_plan_and_strict_override(tmp_path, capsys):
     assert json.loads(plan["environment"]["HARBORRL_NATIVE_RUNNER_WORKERS"]) == ["worker-a", "worker-b"]
     assert plan["environment"]["N_SAMPLES"] == "2"
     assert plan["environment"]["TRAIN_PYTHON"] == sys.executable
+    assert 'HARBORRL_TRAINING_SEED' not in plan['environment']
+    for seed in (0, 42, 2147483647):
+        seeded = launch_plan(load_config(path, [f'training.seed={seed}']))
+        assert seeded['environment']['HARBORRL_TRAINING_SEED'] == str(seed)
+    for value in ('true', '-1', '2147483648', '1.5'):
+        with pytest.raises(ValueError, match='training.seed'):
+            load_config(path, [f'training.seed={value}'])
+    from harborrl.platform.evidence import run_environment
+    prompt_path = tmp_path / 'prompts.jsonl'
+    assert 'SAVE_HF' not in run_environment(plan, tmp_path, Path(catalog_path), prompt_path)
+    exported = launch_plan(load_config(path, ['training.export_hf=true']))
+    assert run_environment(exported, tmp_path, Path(catalog_path), prompt_path)['SAVE_HF'] == str(
+        tmp_path / 'hf' / 'rollout-{rollout_id}')
+    for value in ('1', 'null', '"true"'):
+        with pytest.raises(ValueError, match='training.export_hf'):
+            load_config(path, [f'training.export_hf={value}'])
     assert json.loads(plan["environment"]["HARBORRL_NATIVE_TASK_WORKER_OVERRIDES"]) == {}
     assert plan["training_command"][0] == "bash"
     assert plan["launcher"].startswith("native Claude Code")
@@ -146,13 +162,10 @@ def test_cli_command_mode_selects_experiment_dimensions(tmp_path, capsys, monkey
     ([], '0.0001'),
     (['training.learning_rate=0.000025'], '2.5e-05'),
 ])
-@pytest.mark.parametrize('layout', ['split', 'colocate'])
-def test_native_shell_dry_run_uses_official_v032_hooks(tmp_path, overrides, expected_lr, layout):
+def test_native_shell_dry_run_uses_official_v032_hooks(tmp_path, overrides, expected_lr):
     config_path, task = native_config(tmp_path)
     from harborrl.data.harbor.native_inspector import inspect_native
-    total_gpus = '8' if layout == 'split' else '4'
-    config = load_config(config_path, [*overrides, f'deployment.layout={layout}',
-                                      f'deployment.num_gpus={total_gpus}'])
+    config = load_config(config_path, overrides)
     catalog_path = Path(config['tasks']['catalog'])
     entries = json.loads(catalog_path.read_text())
     entries[0]['task_digest'] = inspect_native(task)['task_digest']
@@ -174,9 +187,9 @@ def test_native_shell_dry_run_uses_official_v032_hooks(tmp_path, overrides, expe
         "HARNESS_OPTION": "native-claude-code", "HARBORRL_NATIVE_ROLLOUT": "1",
         "HARBORRL_SKIP_GLOBAL_CLEANUP": "1", "ROLLOUT_PROMPT_DATA": str(prompt),
         "HF_CKPT": "/model", "REF_LOAD": "/reference", "MODEL_ARGS_FILE": "qwen3-8B",
-        "MODEL_TAG": "qwen3-8B", "NUM_GPUS": total_gpus, "ACTOR_GPUS": "4",
+        "MODEL_TAG": "qwen3-8B", "NUM_GPUS": "8", "ACTOR_GPUS": "4",
         "ROLLOUT_GPUS": "4", "TP_SIZE": "4", "ROLLOUT_NUM_GPUS_PER_ENGINE": "4",
-        "HARBORRL_GPU_LAYOUT": layout, "NUM_ROLLOUT": "1", "SAVE_INTERVAL": "1",
+        "HARBORRL_GPU_LAYOUT": "split", "NUM_ROLLOUT": "1", "SAVE_INTERVAL": "1",
         "RUN_DIR": str(root), "RUN_ID": "run",
         "RUNS_ROOT": str(tmp_path), "CKPT_ROOT": str(root / "checkpoints"),
         "HARBORRL_NATIVE_MAX_ATTEMPTS": "2", "HARBORRL_NATIVE_DRAIN_TIMEOUT": "1",
@@ -185,6 +198,7 @@ def test_native_shell_dry_run_uses_official_v032_hooks(tmp_path, overrides, expe
         "HARBORRL_NATIVE_SLIME_CONTRACT": "slime-v032",
         "SLIME_DIR": str(slime),
         "TRAIN_PYTHON": sys.executable,
+        "HARBORRL_TRAINING_SEED": "0",
     })
     env['LR'] = plan['environment']['LR']
     script = Path(__file__).resolve().parents[2] / "harborrl/platform/slime_train.sh"
@@ -203,17 +217,17 @@ def test_native_shell_dry_run_uses_official_v032_hooks(tmp_path, overrides, expe
         '--num-rollout': '1', '--save-interval': '1',
         '--rollout-batch-size': '1', '--n-samples-per-prompt': '2',
         '--rollout-max-response-len': '128', '--rollout-max-context-len': '1024',
-        '--num-gpus-per-node': total_gpus, '--actor-num-gpus-per-node': '4',
+        '--num-gpus-per-node': '8', '--actor-num-gpus-per-node': '4',
         '--rollout-num-gpus': '4', '--tensor-model-parallel-size': '4',
         '--rollout-num-gpus-per-engine': '4', '--hf-checkpoint': '/model',
         '--ref-load': '/reference', '--prompt-data': str(prompt),
         '--save': str(root / 'checkpoints' / 'run'),
+        '--seed': '0', '--rollout-seed': '0',
     }
     for flag, value in expected_flags.items():
         assert arguments[arguments.index(flag) + 1] == value
     recorded = json.loads(next((root / 'dry-run-commands').glob('*.json')).read_text())
     assert recorded['command'] == arguments
-    assert arguments.count('--colocate') == int(layout == 'colocate')
     assert recorded['mode'] == 'dry_run'
     for argument in (
         "--rollout-function-path harborrl.backends.slime_v032.rollout.generate_rollout",
@@ -225,8 +239,9 @@ def test_native_shell_dry_run_uses_official_v032_hooks(tmp_path, overrides, expe
         assert argument in command
     assert "native_slime" not in command
     assert "--use-rollout-logprobs" in command
+    assert '--sglang-enable-deterministic-inference' in command
     assert "--megatron-to-hf-mode bridge" in command
-    assert "--no-save-optim" in command
+    assert "--no-save-optim" not in command
     assert "--load /model" in command
     assert command.count(" --load ") == 1
     assert "--num-steps-per-rollout 2" in command
@@ -241,7 +256,8 @@ def test_native_shell_dry_run_uses_official_v032_hooks(tmp_path, overrides, expe
     assert result.returncode == 0, result.stdout
     command = next(line for line in result.stdout.splitlines() if line.startswith("[dry-run] "))
     assert "--load /checkpoint" in command
-    assert "--no-load-optim" in command
+    assert "--no-load-optim" not in command
+    assert "--use-checkpoint-opt-param-scheduler" in command
 
 
 def test_slime_runtime_config_maps_args_and_environment(tmp_path, monkeypatch):
@@ -333,6 +349,8 @@ def test_native_slots_spread_workers_and_shift_retries(tmp_path, monkeypatch):
         "HARBORRL_NATIVE_MAX_ATTEMPTS": "2",
         "HARBORRL_NATIVE_GATEWAY_URL": "http://gateway:32123",
         "HARBORRL_NATIVE_GATEWAY_PORT": "32123",
+        # Fake runtimes carry no lease bookkeeping: pin static routing.
+        "HARBORRL_NATIVE_GATEWAY_ROUTING": "modulo",
         "HARBORRL_NATIVE_RUNNER_PYTHON": "/python",
         "HARBORRL_NATIVE_CATALOG": str(tmp_path / "catalog.json"),
         "HARBORRL_NATIVE_TOKENIZER_DIGEST": "0" * 64,
@@ -371,8 +389,11 @@ def test_native_slots_spread_workers_and_shift_retries(tmp_path, monkeypatch):
     monkeypatch.setattr(rollout_runtime, "GroupSlots", fake_group_slots)
     monkeypatch.setattr(rollout_runtime, "run_attempt", fake_run_attempt)
 
-    runtime_ = SimpleNamespace(rollout_root=tmp_path, semaphore=asyncio.Semaphore(8),
-                               registry=SimpleNamespace(), profile={"model": "policy"})
+    runtime_ = SimpleNamespace(
+        rollout_root=tmp_path, semaphore=asyncio.Semaphore(8),
+        shards=(SimpleNamespace(name="gateway", url="http://gateway:32123",
+                                registry=SimpleNamespace()),),
+        profile={"model": "policy"})
 
     async def gather_slots():
         return await asyncio.gather(*[
@@ -432,6 +453,11 @@ def test_native_dispatch_passes_materialized_prompt_data(tmp_path, monkeypatch):
     assert effective['environment']['N_SAMPLES'] == '2'
     assert effective['environment']['ROLLOUT_PROMPT_DATA'] == output.read_text()
     assert effective['components']['algorithm'] == 'grpo'
+    assert effective['update_semantics'] == {
+        'advantage': 'reward_minus_complete_group_mean',
+        'std_normalization': False,
+        'reduction': 'trajectory_weighted_clipped_pg_v1',
+    }
     assert effective['deployment_environment']['SLIME_DIR'] == '/opt/slime-v0.3.2'
     assert 'ambient-provider-credential' not in effective_text
     assert 'user:credential' not in effective_text
@@ -448,6 +474,69 @@ def test_all_schema_fields_have_declared_consumers():
     assert set(field_usage()) == {
         f'{section}.{field}' for section, fields in FIELDS.items() for field in fields
     }
+
+
+@pytest.mark.parametrize('cancel_batch', [False, True])
+@pytest.mark.parametrize('uneven_cleanup', [False, True])
+@pytest.mark.parametrize('cancel_during_cleanup', [False, True])
+def test_native_batch_waits_for_all_group_cleanup(
+        monkeypatch, cancel_batch, uneven_cleanup, cancel_during_cleanup):
+    from harborrl.backends.slime_v032 import rollout
+    from harborrl.rollout import runtime as rollout_runtime
+
+    monkeypatch.delenv('HARBORRL_ROLLOUT_SERVICE_URL', raising=False)
+    cleaned, closed = [], []
+    failure = RuntimeError('one group failed')
+
+    async def scenario():
+        started = set()
+        all_started, blocked = asyncio.Event(), asyncio.Event()
+        cleanup_started = asyncio.Event()
+
+        async def slot(config, runtime_, group, index, entry, reward_profile):
+            started.add((group, index))
+            if len(started) == 4:
+                all_started.set()
+            try:
+                await all_started.wait()
+                if not cancel_batch and (group, index) == (0, 0):
+                    raise failure
+                await blocked.wait()
+            finally:
+                # Cleanup must be awaited across both levels of group tasks.
+                if (group, index) == (1, 1):
+                    cleanup_started.set()
+                await asyncio.sleep(0)
+                await asyncio.sleep(0.02 if uneven_cleanup and index else 0)
+                cleaned.append((group, index))
+
+        async def generate(args, group, params, rollout_id):
+            return await rollout_runtime.run_group(
+                SimpleNamespace(group_size=2), None, entry={}, group_index=group,
+                rollout_id=rollout_id, sampling_digest='sampling', policy_version='1')
+
+        monkeypatch.setattr(rollout_runtime, '_group_slots',
+                            lambda config, runtime_, group, *args: (group, None))
+        monkeypatch.setattr(rollout_runtime, '_run_slot', slot)
+        monkeypatch.setattr(rollout, 'generate_group', generate)
+        monkeypatch.setattr(rollout, 'close_runtime', lambda: closed.append(set(cleaned)))
+        batch = asyncio.create_task(rollout.run_native_groups(
+            SimpleNamespace(rollout_max_response_len=128), [0, 1], '1', 0))
+        await asyncio.wait_for(all_started.wait(), timeout=5)
+        if cancel_batch:
+            batch.cancel()
+        if cancel_during_cleanup:
+            await asyncio.wait_for(cleanup_started.wait(), timeout=5)
+            batch.cancel()
+        expected_error = asyncio.CancelledError if cancel_batch else RuntimeError
+        with pytest.raises(expected_error) as exc:
+            await asyncio.wait_for(batch, timeout=5)
+        if not cancel_batch:
+            assert exc.value is failure
+        assert closed == [{(0, 0), (0, 1), (1, 0), (1, 1)}]
+        assert len(cleaned) == 4
+
+    asyncio.run(scenario())
 
 
 def test_schema_validation_does_not_read_harness_files(tmp_path):

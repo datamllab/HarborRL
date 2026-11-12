@@ -2,28 +2,8 @@
 
 The configuration tools run with the core package (Python 3.10+ and PyYAML).
 They enumerate implemented capabilities, check configuration offline, and create
-consistent training schema 2 / deployment schema 1 files. Catalog, preview and
-validation stay offline. Model preparation explicitly runs the selected Python
-locally or over SSH to fingerprint an existing tokenizer. It does not download
-models or allocate Sandbox/GPU jobs.
-
-## First run without a task JSON or GPU
-
-Install the core package and try the bundled CPU walkthrough:
-
-```bash
-python -m pip install -e .
-harborrl hello --out-dir ./hello-first
-harborrl web --workspace ./harborrl-web
-```
-
-Hello World executes two scripted attempts at creating a file, runs the actual
-task verifier, collects rewards 0 and 1, assembles native IR and exports a GRPO
-batch. It uses fixture token evidence, marked `CONTRACT_READY`; it does not perform
-model inference or update GPU weights. All files stay under the new output
-directory. The generated `catalog.json` and `claude-code-profile.json` can be reused
-when configuring real training. The command also works from an installed wheel
-outside a source checkout, on Windows or Linux.
+consistent training schema 2 / deployment schema 1 files. They do not install
+software, download tasks or models, connect over SSH, or allocate Sandbox/GPU jobs.
 
 ## Browse and validate
 
@@ -78,13 +58,12 @@ compatibility is additionally checked by the existing training dry-run.
 2. Prepare a pinned Claude Code profile. See
    [the native examples](../examples/native) for profile structure. It must match
    the agent and task requirements of your deployment.
-3. Stage checkpoint and reference directories on the GPU target. The wizard
-   calculates both tokenizer fingerprints automatically, using that target's
-   Python with Transformers installed. No manual SHA-256 entry is needed. In Web,
-   choose **Prepare model** after setting the checkpoint and environment. The
-   operation loads tokenizer files offline with `trust_remote_code=False` and calls
-   the same fingerprint function as the rollout runtime. A missing dependency or
-   checkpoint produces an actionable error; the draft can still be saved.
+3. Stage checkpoint and reference directories on the GPU target. In its existing
+   training environment, load the actual local tokenizer with the same options as
+   the runtime and call `harborrl.rollout.runtime.tokenizer_fingerprint(tokenizer)`.
+   Its return values are `tokenizer_digest, template_digest`. This is an explicit
+   preparation step, not an operation performed by the wizard. Hashing a filename
+   or guessing an arbitrary 64-character value does not establish compatibility.
 4. Identify controller/GPU/runner Python executables, checkout paths, SSH aliases
    and shared storage. Service origins must include their declared ports and be
    reachable by the participating machines.
@@ -100,36 +79,13 @@ harborrl init --out-dir ./site-new
 harborrl init --answers my-answers.yaml --out-dir ./site-new
 ```
 
-Interactive mode explains each required field. Local asks for one shared source
-directory and Python interpreter, detected from the host running the wizard;
-Controller, GPU and rollout all use those values. Storage is configured
-separately. Service modes ask for each remote role and its reachable origins.
-The wizard prepares model fingerprints automatically, previews both
-configurations and requires `yes` to publish.
+Interactive mode asks for deployment roles, existing inputs, model fingerprints,
+GPU layout and a few sampling settings, then previews both configurations and
+requires `yes` to publish. Entering no or EOF cancels. Non-terminal use requires
+`--answers`; missing required answers never fall back to prompting.
 
-Progress is saved after every answer to `OUT_DIR.draft.json`. Type `?` for help,
-`:skip` to leave a field empty, or `:save` to save and exit. Ctrl+C or EOF after
-choosing a deployment also keeps the draft. Resume it later:
-
-```bash
-harborrl init --out-dir ./site-new --resume ./site-new.draft.json
-harborrl init --out-dir ./empty-site --save-draft
-harborrl init --out-dir ./local-example --example local
-harborrl init --out-dir ./sandbox-example --example sandbox
-```
-
-`--example` saves a filled reference draft using the current host's detected
-environment. Replace example paths and hosts before resuming. `--draft-file`
-chooses a different progress file. Incomplete drafts never become runnable
-bundles. Draft updates check revisions and reject stale writers.
-
-Non-terminal generation accepts `--answers` or `--resume`. Missing fingerprints
-trigger explicit tokenizer preparation; `--prepare-model` recalculates existing
-values. Missing required answers never fall back to prompting. Use `--save-draft`
-to store incomplete answers without running preparation or final validation.
-
-Start from one of these reference answer templates and replace example paths
-before running:
+Start from one of these complete answer templates and replace every `REPLACE_*`
+value and example path before running:
 
 - [embedded-local](../examples/options/embedded-local.answers.yaml): one machine,
   local Harbor runner, colocated training/serving by default.
@@ -138,18 +94,13 @@ before running:
 - [service-sandbox-local-runner](../examples/options/service-sandbox.answers.yaml):
   controller and runner here, SSH GPU target, Sandbox task execution.
 
-Templates leave fingerprints empty for automatic preparation. Web also offers
-filled Local and Sandbox recipes with notes, download and apply actions.
-GPU allocations illustrate topology; confirm memory requirements for your model
-before training. For Local Docker, the gateway advertised origin must be
-reachable inside task containers. On Linux, configure the host-gateway mapping
-if using `host.docker.internal`, or choose a reachable host address.
+Templates deliberately contain invalid digest placeholders. They cannot claim
+training readiness without your real inputs. Default one-GPU colocate is a
+configuration starting point, not a Qwen model memory-fit recommendation.
 
 Answers allow only `answers_version: 1`, `preset`, `training`, `deployment`, and
-optional `sandbox_config` and `local_environment`. Local's `local_environment`
-contains `source_dir` and `python` and applies to all three roles, taking precedence
-over advanced per-role overrides. Overrides use the existing schema field names;
-unknown keys fail. Answer values are not evaluated as shell expressions. Gateway fields,
+optional `sandbox_config`. Overrides use the existing schema section/field names;
+unknown keys fail. No expressions or shell commands are evaluated. Gateway fields,
 shared run root, GPU budget and worker destinations are derived when only one
 side is provided. Contradictory explicit values fail. Supply matching origin URLs
 when changing ports. Paths in training overrides are relative to the **final
@@ -187,3 +138,16 @@ harborrl doctor site-new/config.yaml --deployment site-new/deployment.yaml
 
 `doctor` performs live environment/connectivity checks. Actual training remains a
 separate action. Command examples use POSIX shell quoting.
+
+## Maintenance
+
+`harborrl.options.build_catalog()` and
+`build_config_bundle(answers, output_directory=...)` have no terminal dependency;
+the latter returns file contents and validation without publishing them. The
+authoritative validators remain in the existing training/deployment modules.
+Field descriptions are display metadata, not a second validation engine.
+
+Dataset metadata is maintained in `harborrl/options/resources/datasets.yaml` and
+packaged using importlib resources. Run `python scripts/sync_options_manifest.py`
+after changing it; `--check` detects drift in the legacy manifest. No web server,
+new algorithm, resource scheduler or H-specific core preset is introduced.

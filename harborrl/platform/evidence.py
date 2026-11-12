@@ -25,12 +25,23 @@ def run_environment(plan, root, catalog_path, prompt_path):
         "CKPT_ROOT": str(root / "checkpoints"), "WANDB_DIR": str(root / "metrics/wandb"),
         "HARBORRL_NATIVE_CATALOG": str(catalog_path),
         "ROLLOUT_PROMPT_DATA": str(prompt_path),
-        "HARBORRL_NATIVE_PROFILE": plan["config"]["harness"]["profile"],
+        **({"HARBORRL_NATIVE_PROFILE": plan["config"]["harness"]["profile"]}
+           if "harness" in plan["config"] else {}),
         "HARBOR_IR_ROOT": str(root / "ir"),
+        **({"SAVE_HF": str(root / "hf" / "rollout-{rollout_id}")}
+           if plan['config']['training'].get('export_hf') else {}),
+        **({'HARBORRL_OPD_TEACHER': str(root / 'config' / 'teacher.json')}
+           if plan['math']['algorithm']['id'] == 'opd' else {}),
+        **({'HARBORRL_PROCESS_REWARD': str(root / 'config' / 'process_reward.json')
+            if 'process_reward' in plan['config'] else ''}
+           if plan['config']['execution']['backend'] == 'text_math' else {}),
     }
 
 
 def _materialize(plan, root):
+    if plan['config']['execution']['backend'] == 'text_math':
+        from harborrl.math.config import materialize
+        return materialize(plan, root)
     from harborrl.math_registry import select_math
 
     config = plan["config"]
@@ -95,12 +106,47 @@ def effective_config(plan, environment, child_env, source, checks):
         "environment": environment,
         "deployment_environment": {key: child_env[key] for key in DEPLOYMENT_EVIDENCE_KEYS if key in child_env},
         "training_command": plan["training_command"],
+        "update_semantics": ({
+            "objective": "sampled_token_fixed_prefix_reverse_kl_surrogate",
+            "advantage": "detached_teacher_logprob_minus_detached_behavior_logprob",
+            "reward_mixing": False,
+            "clipping": False,
+            "std_normalization": False,
+            "reduction": "trajectory_weighted_sampled_opd_v1",
+            "teacher_manifest": "config/teacher.json",
+        } if plan['math']['algorithm']['id'] == 'opd' else {
+            'objective': 'asymmetric_clipped_policy_gradient',
+            'advantage': 'shaped_reward_minus_complete_group_mean_div_sample_std_plus_1e-6',
+            'std_normalization': True,
+            'reduction': 'global_token_mean_asymmetric_clipped_pg_v1',
+            'dynamic_sampling': 'reject_zero_variance_outcome_groups_and_refill_complete_groups',
+            'truncation': 'retain_all_response_tokens_with_soft_overlong_penalty',
+            **config['dapo'],
+        } if plan['math']['algorithm']['id'] == 'dapo' else {
+            'objective': 'trajectory_weighted_clipped_process_policy_gradient',
+            'reward_source': 'qwen-math-prm-v1',
+            'step_reward': '2 * positive_probability - 1',
+            'advantage': 'undiscounted_step_reward_to_go_minus_complete_group_mean_total_reward',
+            'step_boundary': 'double_newline_at_student_token_boundary; boundary_token_belongs_to_previous_step',
+            'std_normalization': False,
+            'outcome_reward_mixing': False,
+            'truncation': 'score_observed_tail; retain_all_response_tokens; no_unobserved_suffix_reward',
+            'reduction': 'trajectory_weighted_clipped_pg_v1',
+            'scorer_manifest': 'config/process_reward.json',
+        } if 'process_reward' in config else {
+            "advantage": "reward_minus_complete_group_mean",
+            "std_normalization": False,
+            "reduction": "trajectory_weighted_clipped_pg_v1",
+        }),
         "expanded_command_file": "effective-command.json",
         "source": source,
         "runtime_versions": [check for check in checks
                              if "version" in check or check.get("service") in
                              ("slime commit", "megatron commit", "sglang image")],
-        "field_usage": field_usage(),
+        "field_usage": ({f'{section}.{key}': ['text_math configuration']
+                         for section, values in config.items() if isinstance(values, dict)
+                         for key in values}
+                        if config['execution']['backend'] == 'text_math' else field_usage()),
         "precedence": "YAML < --set in order < explicit MATH selectors; declared deployment environment only",
     }
 

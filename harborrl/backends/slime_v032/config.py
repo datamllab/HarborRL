@@ -91,6 +91,8 @@ def launch_plan(config):
         'HARBORRL_CONSISTENCY_MODE': c['consistency']['mode'],
     }
     environment['HARBORRL_NATIVE_RUNNER_TRANSPORT'] = c['harbor'].get('runner_transport', 'ssh')
+    if c['training'].get('seed') is not None:
+        environment['HARBORRL_TRAINING_SEED'] = c['training']['seed']
     if sandbox is not None:
         environment['HARBORRL_NATIVE_SANDBOX'] = json.dumps(sandbox, sort_keys=True)
     return {'config': config, 'math': selection.asdict(),
@@ -117,6 +119,8 @@ def field_usage():
         "harness.name": ["schema:claude_code", "runner:Claude Code"],
         "harbor.version": ["preflight:worker runtime version"],
         "training.backend_contract": ["environment:HARBORRL_NATIVE_SLIME_CONTRACT", "preflight:backend hooks"],
+        "training.seed": ["environment:HARBORRL_TRAINING_SEED"],
+        "training.export_hf": ["run_environment:SAVE_HF"],
         "harbor.workers": ["environment:HARBORRL_NATIVE_RUNNER_WORKERS", "preflight:worker probe"],
         "harbor.runner_transport": ["environment:HARBORRL_NATIVE_RUNNER_TRANSPORT"],
         "harbor.environment": ["environment:HARBORRL_NATIVE_SANDBOX", "runner:environment"],

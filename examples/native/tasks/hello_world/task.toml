@@ -3,14 +3,14 @@ version = "1.0"
 [environment]
 os = "linux"
 cpus = 1
-memory_mb = 4096
-storage_mb = 4096
-allow_internet = true
+memory_mb = 512
+storage_mb = 256
+allow_internet = false
 gpus = 0
 
 [agent]
 name = "claude-code"
-max_turns = 4
+max_turns = 1
 
 [verifier]
 type = "shared"

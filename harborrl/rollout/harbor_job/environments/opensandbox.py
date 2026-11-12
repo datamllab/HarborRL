@@ -41,6 +41,11 @@ async def startup_slot(directory, count):
 
 
 class ManagedOpenSandboxEnvironment(OpenSandboxEnvironment):
+    def _validate_definition(self):
+        # The deployment binding selects the built image without rewriting task files.
+        self.task_env_config = self.task_env_config.model_copy(update={'docker_image': self.binding['image']})
+        super()._validate_definition()
+
     @classmethod
     def validate_config(cls, cfg):
         if cfg['options'] or any(b['options'] for b in cfg['bindings']):
@@ -67,7 +72,8 @@ class ManagedOpenSandboxEnvironment(OpenSandboxEnvironment):
         from harborrl.rollout.harbor_job.sandbox_transport import (
             SandboxStartupTransport,
         )
-        return SandboxStartupTransport(self.cfg['domain'].rstrip('/') + '/v1', allocated)
+        return SandboxStartupTransport(self.cfg['domain'].rstrip('/') + '/v1', allocated,
+                                       on_request=self.record_request)
 
     def __init__(self, *args, sandbox_config, binding, evidence_dir, startup_dir, gateway_url=None, **kwargs):
         self.validate_config(sandbox_config)
@@ -76,6 +82,8 @@ class ManagedOpenSandboxEnvironment(OpenSandboxEnvironment):
         self.startup_dir = startup_dir
         self.gateway_url = gateway_url
         self._startup_transport = None
+        self._startup_reservation = None
+        self._startup_requests = 0
         self.record = {'runtime_digest': digest(sandbox_config),
                        'image': binding['image'], 'sandbox_id': None, 'state': 'pending', 'events': []}
         super().__init__(*args, domain=self.cfg['domain'], api_key=read_credential(self.cfg),
@@ -99,9 +107,51 @@ class ManagedOpenSandboxEnvironment(OpenSandboxEnvironment):
             'sandbox_id': self.record['sandbox_id'], 'image': self.binding['image'],
             'reason': reason, 'runtime_digest': self.record['runtime_digest']})
 
+    def record_request(self, record):
+        self._startup_requests += 1
+        publish(self.evidence / 'sandbox-requests' / f'{self._startup_requests:04d}.json', record)
+
+    async def reserve_startup(self):
+        """The Runner reserves before Harbor starts its environment timeout."""
+        if self._startup_reservation is not None:
+            raise RuntimeError('Sandbox startup slot already reserved')
+        self.record_state('waiting')
+        reservation = startup_slot(self.startup_dir, self.cfg['startup_concurrency'])
+        await reservation.__aenter__()
+        self._startup_reservation = reservation
+        try:
+            self.record_state('reserved')
+        except BaseException:
+            await self.release_startup()
+            raise
+
+    async def release_startup(self):
+        reservation, self._startup_reservation = self._startup_reservation, None
+        if reservation is not None:
+            await reservation.__aexit__(None, None, None)
+
+    def startup_failed(self, stage, exc):
+        """Keep exception classes/status only; SDK messages may contain credentials."""
+        causes, seen = [], set()
+        while exc is not None and id(exc) not in seen:
+            seen.add(id(exc))
+            row = {'error_type': type(exc).__name__}
+            status = getattr(exc, 'status_code', None)
+            if type(status) is int:
+                row['http_status'] = status
+            causes.append(row)
+            exc = exc.__cause__ or exc.__context__
+        publish(self.evidence / 'sandbox-startup-failed.json', {
+            'stage': stage, 'sandbox_id': self.record['sandbox_id'], 'causes': causes,
+            'create_timeout_s': self.cfg['create_timeout_s'],
+            'request_timeout_s': self.cfg['request_timeout_s']})
+
     async def _create_sandbox(self, sdk):
-        await self.validate_binding()
-        async with startup_slot(self.startup_dir, self.cfg['startup_concurrency']):
+        # Direct environment callers retain the same process-shared limit.
+        if self._startup_reservation is None:
+            await self.reserve_startup()
+        try:
+            await self.validate_binding()
             self.record_state('creating')
             def allocated(sandbox_id):
                 self.record['sandbox_id'] = sandbox_id
@@ -118,7 +168,8 @@ class ManagedOpenSandboxEnvironment(OpenSandboxEnvironment):
                     resource=self._build_resource(), env=dict(self._persistent_env),
                     network_policy=self._build_network_policy(sdk), skip_health_check=True),
                     self.cfg['create_timeout_s'])
-            except BaseException:  # noqa: BLE001 - persist unknown allocation on cancellation too
+            except BaseException as exc:  # noqa: BLE001 - persist unknown allocation on cancellation too
+                self.startup_failed('create', exc)
                 if self.record['sandbox_id']:
                     await self._cleanup_allocated()
                 else:
@@ -133,9 +184,12 @@ class ManagedOpenSandboxEnvironment(OpenSandboxEnvironment):
                 await asyncio.wait_for(self._wait_until_ready(sandbox), self.cfg['create_timeout_s'])
                 self.record_state('ready')
                 return sandbox
-            except BaseException:  # noqa: BLE001 - cleanup before redacting SDK errors
+            except BaseException as exc:  # noqa: BLE001 - cleanup before redacting SDK errors
+                self.startup_failed('readiness', exc)
                 await self.stop(delete=True)
                 raise RuntimeError('Sandbox readiness failed') from None
+        finally:
+            await self.release_startup()
 
     async def _cleanup_allocated(self):
         """The SDK may already have killed an instance whose endpoints failed."""
@@ -163,6 +217,8 @@ class ManagedOpenSandboxEnvironment(OpenSandboxEnvironment):
             if self._sandbox is not None:
                 await self.stop(delete=True)
             raise
+        finally:
+            await self.release_startup()
 
     async def stop(self, delete=True):
         if self._sandbox is None:

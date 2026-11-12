@@ -15,13 +15,16 @@ from .messages import ProtocolError
 class SGLangBackend:
     def __init__(self, endpoint, tokenizer, model_adapter, *, tokenizer_digest,
                  template_digest, timeout=120, max_context=32768,
-                 audited_raw_logprobs=False):
+                 audited_raw_logprobs=False, sampling_seed=None):
+        if sampling_seed is not None and (type(sampling_seed) is not int or not 0 <= sampling_seed < 2**31):
+            raise ValueError('sampling_seed must be null or an integer in 0..2147483647')
         self.endpoint = endpoint.rstrip("/")
         self.tokenizer = tokenizer
         self.model_adapter = model_adapter
         self.tokenizer_digest, self.template_digest = tokenizer_digest, template_digest
         self.timeout, self.max_context = timeout, max_context
         self.audited_raw_logprobs = audited_raw_logprobs
+        self.sampling_seed = sampling_seed
         self.opener = request.build_opener(request.ProxyHandler({}))
 
     def prepare(self, converted):
@@ -65,7 +68,14 @@ class SGLangBackend:
 
     def generate(self, converted, identity, response_id):
         ids = self.prepare(converted)
-        payload = {"input_ids": ids, "sampling_params": converted["sampling"],
+        sampling = dict(converted['sampling'])
+        if self.sampling_seed is not None:
+            sampling['sampling_seed'] = int(digest({
+                'seed': self.sampling_seed, 'batch': identity.batch_id,
+                'group': identity.group_id, 'slot': identity.slot_id,
+                'task': identity.task_digest, 'input_ids': ids,
+            }), 16) % 2**31
+        payload = {"input_ids": ids, "sampling_params": sampling,
                    "return_logprob": True, "stream": False}
         req = request.Request(self.endpoint + "/generate", data=json.dumps(payload).encode(),
                               headers={"Content-Type": "application/json"})
@@ -91,18 +101,23 @@ class SGLangBackend:
         if reported_ids is not None and reported_ids != output_ids:
             raise ValueError("serving output token IDs disagree with logprob evidence")
         decoded = self.tokenizer.decode(output_ids, skip_special_tokens=True)
-        if not decoded.startswith(text) and not text.startswith(decoded.rstrip("\n")):
-            raise ValueError("serving text disagrees with output token IDs")
         finish = meta.get("finish_reason", {})
-        if finish.get("type") not in ("stop", "length"):
+        if not isinstance(finish, dict) or finish.get("type") not in ("stop", "length"):
             raise ValueError("unsupported serving finish reason")
+        # SGLang may omit the explicitly matched terminal stop string from text.
+        # Nothing else may be dropped, appended, or whitespace-normalized.
+        matched = finish.get("matched")
+        stop_sequence = matched if (finish["type"] == "stop" and isinstance(matched, str)
+                                    and matched in converted["sampling"]["stop"]) else None
+        if decoded != text and not (stop_sequence and decoded == text + stop_sequence):
+            raise ValueError("serving text disagrees with output token IDs")
         blocks = self.model_adapter.parse_output(
             text, response_id=response_id, tools=converted["tools"]
         )
         has_tools = any(b["type"] == "tool_use" for b in blocks)
-        stop_sequence = finish.get("matched") if isinstance(finish.get("matched"), str) else None
-        if stop_sequence not in converted["sampling"]["stop"]:
-            stop_sequence = None
+        declared = {tool['function']['name'] for tool in converted['tools']}
+        unavailable = [{'id': b['id'], 'name': b['name']} for b in blocks
+                       if b['type'] == 'tool_use' and b['name'] not in declared]
         eos_id = getattr(self.tokenizer, "eos_token_id", None)
         eos = finish["type"] == "stop" and finish.get("matched") == eos_id
         reason = "max_tokens" if finish["type"] == "length" else (
@@ -114,4 +129,5 @@ class SGLangBackend:
                 "serving_input": payload, "evidence_kind": "serving", "content": blocks,
                 "finish_reason": reason, "stop_sequence": stop_sequence, "eos": eos,
                 "sampling": converted["sampling"],
+                "model_output_text": text, "unavailable_tool_calls": unavailable,
                 "serving_output_digest": digest(output)}

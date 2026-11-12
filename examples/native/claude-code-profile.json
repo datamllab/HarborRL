@@ -1,8 +1,8 @@
 {
-  "agent_timeout_sec": 120,
-  "cli_version": "2.1.141",
-  "max_turns": 4,
+  "agent_timeout_sec": 60,
+  "cli_version": "2.1.0",
+  "max_turns": 1,
   "model": "policy",
-  "setup_timeout_sec": 300,
+  "setup_timeout_sec": 60,
   "verifier_timeout_sec": 60
 }

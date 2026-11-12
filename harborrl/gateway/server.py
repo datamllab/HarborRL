@@ -1,6 +1,7 @@
 """Bounded stdlib HTTP transport. All policy requests require attempt credentials."""
 import json
 import secrets
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
@@ -46,7 +47,17 @@ class Gateway:
         return {"input_tokens": self.backend.count_tokens(converted)}
 
 
-def make_server(gateway, host="127.0.0.1", port=0, *, max_body_bytes=8 * 1024 * 1024):
+def make_server(gateway, host="127.0.0.1", port=0, *, max_body_bytes=8 * 1024 * 1024,
+                max_inflight=None):
+    """Serve one gateway. ``max_inflight`` bounds concurrent policy requests.
+
+    Beyond the bound the server answers 503 before any attempt state is
+    touched, so an overloaded gateway never poisons a seal: no generation
+    began and a client retry is safe. ``None`` keeps the historic unbounded
+    behavior for tests and embedded single-attempt use.
+    """
+    inflight = threading.BoundedSemaphore(max_inflight) if max_inflight else None
+
     class Handler(BaseHTTPRequestHandler):
         def setup(self):
             super().setup()
@@ -69,6 +80,16 @@ def make_server(gateway, host="127.0.0.1", port=0, *, max_body_bytes=8 * 1024 * 
             self.wfile.write(body)
 
         def do_POST(self):
+            if inflight is not None and not inflight.acquire(blocking=False):
+                return self.reply(503, {"type": "error", "error": {"type": "overloaded_error",
+                                      "message": "gateway in-flight request limit reached"}})
+            try:
+                return self._handle_post()
+            finally:
+                if inflight is not None:
+                    inflight.release()
+
+        def _handle_post(self):
             aid = message = None
             try:
                 path = urlsplit(self.path).path
@@ -112,6 +133,10 @@ def make_server(gateway, host="127.0.0.1", port=0, *, max_body_bytes=8 * 1024 * 
                 # Do not echo backend errors or request contents (credentials may appear there).
                 self.reply(status, {"type": "error", "error": {"type": "authentication_error" if status == 401 else "invalid_request_error" if status == 400 else "api_error", "message": f"{type(exc).__name__}: {exc}"}})
 
-    server = ThreadingHTTPServer((host, port), Handler)
-    server.daemon_threads = True
+    class Server(ThreadingHTTPServer):
+        # One thread per connection; the kernel backlog bounds queued peers.
+        daemon_threads = True
+        request_queue_size = 128
+
+    server = Server((host, port), Handler)
     return server

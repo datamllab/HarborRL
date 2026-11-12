@@ -1,1 +1,1 @@
-{"id": "hello_world", "path": "tasks/hello_world", "revision": "v0.1-example", "reward_profile": {"key": "reward", "offset": 0.0, "raw_range": [0.0, 1.0], "scale": 1.0}, "task_digest": "2293cd4682597d9c6c5a4bb35d2ded9978873a8deb48ee07fae4e58121c79691"}
+{"id": "hello_world", "path": "tasks/hello_world", "revision": "v0.1-example", "reward_profile": {"key": "reward", "offset": 0.0, "raw_range": [0.0, 1.0], "scale": 1.0}, "task_digest": "905f496d2852cca5b1e86e9de72395b41c291d2b8f6a80807e0ed24ca19541b3"}

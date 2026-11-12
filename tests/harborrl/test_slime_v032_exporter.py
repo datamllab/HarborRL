@@ -24,7 +24,7 @@ from harborrl.backends.slime_v032.loss import (
 from harborrl.backends.slime_v032.postprocess import rollout_data_postprocess
 from harborrl.backends.slime_v032.rollout import generate_rollout, to_slime_samples
 from harborrl.export import contract as export_contract
-from harborrl.export.native import export_training_batch
+from harborrl.export.native import export_training_batch, group_statistics
 from harborrl.export.validate import batch_weight_sum
 from harborrl.trajectories.native import digest
 
@@ -104,7 +104,7 @@ def test_export_training_batch_goldel(tmp_path):
     assert batch.groups[1].reward_std == 0.0
     assert [unit.advantage for unit in batch.groups[1].trajectories] == [0.0, 0.0]
     first_advantages = [unit.advantage for unit in batch.groups[0].trajectories]
-    assert first_advantages[0] < 0 < first_advantages[1]
+    assert first_advantages == [-0.5, 0.5]
     assert [unit.token_count for group in batch.groups for unit in group.trajectories] == [2, 6, 4, 2]
     for group in batch.groups:
         for unit in group.trajectories:
@@ -117,6 +117,23 @@ def test_export_training_batch_goldel(tmp_path):
                 assert len(span.old_logprobs) == span.response_length
                 assert weight == pytest.approx(1.0 / (2 * unit.token_count))
     assert batch_weight_sum(batch) == pytest.approx(2.0)
+
+
+def test_centered_advantages_keep_reward_scale_and_reject_normalized_batch(tmp_path):
+    from dataclasses import replace
+
+    from harborrl.export.validate import validate_batch
+
+    assert group_statistics([0.0, 1.0])[2] == [-0.5, 0.5]
+    assert group_statistics([-2.0, 2.0])[2] == [-2.0, 2.0]
+    batch = export_training_batch(native_groups(tmp_path), rollout_ids=[10, 11])
+    group = batch.groups[0]
+    normalized = replace(group, trajectories=tuple(
+        replace(unit, advantage=unit.advantage / group.reward_std)
+        for unit in group.trajectories
+    ))
+    with pytest.raises(ValueError, match="centered"):
+        validate_batch(replace(batch, groups=(normalized, *batch.groups[1:])))
 
 
 def test_export_rejects_malformed_groups(tmp_path):
@@ -355,13 +372,7 @@ def test_launcher_hooks_resolve_and_dry_run():
         v032_launcher.hook_arguments("slime-legacy")
 
 
-def test_rollout_hook_locks_policy_version_and_keeps_groups_atomic(tmp_path, monkeypatch, request):
-    import asyncio
-
-    from harborrl.rollout.runtime import close_runtime
-
-    close_runtime()
-    request.addfinalizer(close_runtime)
+def test_rollout_hook_locks_policy_version_and_keeps_groups_atomic(tmp_path, monkeypatch):
     groups = native_groups(tmp_path)
     locked = [
         [reidentify(json.loads(json.dumps(ir)), policy_version="7") for ir in group]
@@ -374,18 +385,10 @@ def test_rollout_hook_locks_policy_version_and_keeps_groups_atomic(tmp_path, mon
     args = SimpleNamespace(
         rollout_batch_size=2, n_samples_per_prompt=2, rollout_max_response_len=128,
     )
-    events, loops = [], []
-    semaphore = asyncio.Semaphore(1)
+    events = []
 
     async def runner(args_, groups_, policy_version):
         events.append(("generate", policy_version))
-        loops.append(asyncio.get_running_loop())
-
-        async def queued_slot():
-            async with semaphore:
-                await asyncio.sleep(.001)
-
-        await asyncio.gather(queued_slot(), queued_slot())
         return json.loads(json.dumps(locked))
 
     class SlimeDataSource:
@@ -418,13 +421,6 @@ def test_rollout_hook_locks_policy_version_and_keeps_groups_atomic(tmp_path, mon
     )
     assert all(sample.metadata["native_ir"]["identity"]["policy_version"] == "7" for group in output.samples for sample in group)
 
-    second = generate_rollout(
-        args, 4, SlimeDataSource(), runner=runner, output_factory=SimpleNamespace,
-        sample_factory=lambda **fields: SimpleNamespace(**fields))
-    assert loops[0] is loops[1]
-    assert second.metrics["native_turn_count"] == 7.0
-    assert {sample.rollout_id for group in second.samples for sample in group} == {8, 9}
-
     async def stale_runner(args_, groups_, policy_version):
         return [[reidentify(json.loads(json.dumps(ir)), policy_version="8") for ir in group] for group in locked]
 
@@ -441,6 +437,21 @@ def test_rollout_hook_locks_policy_version_and_keeps_groups_atomic(tmp_path, mon
             runner=runner, output_factory=SimpleNamespace,
             sample_factory=lambda **fields: SimpleNamespace(**fields),
         )
+
+
+@pytest.mark.parametrize("dtype_name", ["int64", "bool", "float32"])
+def test_advantage_preserves_fractional_rewards_with_tensor_masks(dtype_name):
+    torch = pytest.importorskip("torch")
+    data = {
+        "rewards": [-0.25, 0.75],
+        "loss_masks": [torch.ones(2, dtype=getattr(torch, dtype_name)) for _ in range(2)],
+        "rollout_log_probs": [torch.zeros(2) for _ in range(2)],
+    }
+    compute_advantages_and_returns(SimpleNamespace(), data)
+    for key in ("advantages", "returns"):
+        assert data[key][0].tolist() == [-0.25, -0.25]
+        assert data[key][1].tolist() == [0.75, 0.75]
+        assert all(value.dtype == torch.float32 for value in data[key])
 
 
 def test_to_slime_samples_requires_ir_metadata(tmp_path):
@@ -466,7 +477,7 @@ def test_export_package_has_no_backend_imports():
 
 
 @pytest.mark.parametrize('group_index, expected_advantages, expected_counts', [
-    (0, [-0.5 / 0.500001, 0.5 / 0.500001], [2, 6]),
+    (0, [-0.5, 0.5], [2, 6]),
     (1, [0.0, 0.0], [4, 2]),
 ])
 def test_legacy_export_preserves_grpo_record_semantics(

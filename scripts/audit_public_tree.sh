@@ -19,7 +19,7 @@ public_documents = {
     "configs/harbor_hub/public_compatibility_summary.md",
     "configs/harbor_hub/public_compatibility_summary_zh.md",
     "docs/agents/environment-check.md", "docs/configuration-wizard.md",
-    "docs/deployment.md", "docs/rollout-runtime-lifecycle.md", "docs/sandbox-rollout.md",
+    "docs/deployment.md", "docs/math-distill.md", "docs/sandbox-rollout.md",
     "docs/train-inference-consistency.md", "docs/web-console.md",
     "practices/h_cluster/README.md", "harborrl/webui/static/lucide-LICENSE.txt",
 }
@@ -98,7 +98,7 @@ for path in files:
     for label, pattern in internal_patterns.items():
         for match in pattern.finditer(data):
             value = match.group(0)
-            if b"127.0.0.1" in value or b"localhost" in value or value == b"host.docker.internal":
+            if b"127.0.0.1" in value or b"localhost" in value:
                 continue
             raise SystemExit(f"{path} contains {label}: {value.decode(errors='replace')}")
 

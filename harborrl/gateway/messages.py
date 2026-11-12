@@ -9,6 +9,11 @@ class ProtocolError(ValueError):
     pass
 
 
+def unavailable_tool_error(name):
+    """Exact native Claude CLI observation for an unavailable tool."""
+    return f"<tool_use_error>Error: No such tool available: {name}</tool_use_error>"
+
+
 def keys(value, allowed, label):
     if not isinstance(value, dict) or set(value) - set(allowed):
         raise ProtocolError(f"unsupported fields in {label}")
@@ -80,7 +85,7 @@ def convert(payload, *, model, max_output_tokens=8192, count_only=False):
     history = payload.get("messages")
     if not isinstance(history, list) or not history:
         raise ProtocolError("nonempty messages required")
-    pending, seen = set(), set()
+    pending, seen = {}, set()
     for item in history:
         keys(item, ("role", "content"), "message")
         role = item.get("role")
@@ -101,10 +106,12 @@ def convert(payload, *, model, max_output_tokens=8192, count_only=False):
             elif kind == "tool_use" and role == "assistant":
                 keys(block, ("type", "id", "name", "input", "cache_control"), "tool_use")
                 call_id = block.get("id")
-                if not isinstance(call_id, str) or not call_id or call_id in seen or block.get("name") not in names or not isinstance(block.get("input"), dict):
+                name = block.get("name")
+                if (not isinstance(call_id, str) or not call_id or call_id in seen
+                        or not isinstance(name, str) or not name or not isinstance(block.get("input"), dict)):
                     raise ProtocolError("invalid tool_use identity or input")
                 seen.add(call_id)
-                pending.add(call_id)
+                pending[call_id] = name
                 calls.append({"id": call_id, "type": "function", "function": {
                     "name": block["name"], "arguments": json.dumps(block["input"], ensure_ascii=False, allow_nan=False)}})
             elif kind == "tool_result" and role == "user":
@@ -112,9 +119,12 @@ def convert(payload, *, model, max_output_tokens=8192, count_only=False):
                 call_id = block.get("tool_use_id")
                 if call_id not in pending or type(block.get("is_error", False)) is not bool:
                     raise ProtocolError("orphan or duplicate tool_result")
-                pending.remove(call_id)
+                name = pending.pop(call_id)
                 # Preserve error flag as part of model-visible tool observation.
                 content = text_blocks(block.get("content", ""))
+                if name not in names and (block.get("is_error") is not True
+                                          or content != unavailable_tool_error(name)):
+                    raise ProtocolError("undeclared tool requires its exact native rejection")
                 if block.get("is_error"):
                     content = "[tool_error]\n" + content
                 results.append({"role": "tool", "tool_call_id": call_id, "content": content})
@@ -134,7 +144,7 @@ def convert(payload, *, model, max_output_tokens=8192, count_only=False):
         "max_new_tokens": max_tokens, "stop": stop})}
 
 
-def parse_qwen_output(text, *, response_id, tools):
+def parse_qwen_output(text, *, response_id, tools, allow_unknown_tools=False):
     """Deterministic Qwen tool markers; malformed model output is never repaired."""
     if "<think>" in text or "</think>" in text:
         raise ProtocolError("thinking output is not enabled by this profile")
@@ -164,8 +174,10 @@ def parse_qwen_output(text, *, response_id, tools):
                 raise ProtocolError("finish marker must be the final output")
             return blocks
         canonical_name = names.get(generated_name.casefold()) if isinstance(generated_name, str) else None
-        if canonical_name is None:
+        if canonical_name is None and (not allow_unknown_tools or not isinstance(generated_name, str) or not generated_name):
             raise ProtocolError(f"unknown generated tool: {generated_name!r}")
+        if canonical_name is None:
+            canonical_name = generated_name  # Preserve the invalid action for native CLI rejection.
         if not isinstance(call.get("arguments"), dict):
             raise ProtocolError("generated tool arguments are not an object")
         blocks.append({"type": "tool_use", "id": f"toolu_{response_id}_{index}", "name": canonical_name, "input": call["arguments"]})

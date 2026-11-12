@@ -30,6 +30,7 @@ def test_runtime_config_maps_environment(tmp_path, monkeypatch):
         "HARBORRL_NATIVE_AUDITED_LOGPROBS": "1",
         "HARBORRL_NATIVE_DRAIN_TIMEOUT": "5",
         "MODEL_TAG": "qwen3-8B",
+        "HARBORRL_TRAINING_SEED": "0",
     }
     for key, value in environment.items():
         monkeypatch.setenv(key, value)
@@ -39,6 +40,8 @@ def test_runtime_config_maps_environment(tmp_path, monkeypatch):
     assert config.task_worker_overrides == {"task": "worker-b"}
     assert config.max_attempts == 3 and config.max_output_tokens == 128
     assert config.endpoint == "http://router:30000"
+    assert config.sampling_seed == 0
+    assert config.environment()['HARBORRL_TRAINING_SEED'] == '0'
     assert config.environment()["HARBORRL_NATIVE_RUNNER_WORKERS"] == \
         json.dumps(["worker-a", "worker-b"])
     with pytest.raises(ValueError, match="group size"):
@@ -110,8 +113,9 @@ def test_runtime_binds_gateway_with_registry_and_backend(tmp_path, monkeypatch):
         def weight_version(self):
             return "7"
 
-    def fake_make_server(gateway, host, port):
+    def fake_make_server(gateway, host, port, *, max_inflight=None):
         calls["server"] = (gateway, host, port)
+        calls["server_max_inflight"] = max_inflight
         return FakeServer()
 
     monkeypatch.setattr(gateway_server, "Gateway", FakeGateway)
@@ -126,6 +130,10 @@ def test_runtime_binds_gateway_with_registry_and_backend(tmp_path, monkeypatch):
         assert calls["gateway"][2:] == ("policy", 128)
         assert calls["server"][0] is calls["gateway_object"]
         assert calls["server"][1:] == ("127.0.0.1", 49183)
+        # The implicit single gateway keeps the historical trace layout.
+        assert calls["registry_path"] == runtime_.run_root / "native-traces"
+        # Twice the scheduler budget (concurrency_limit=4) with a floor of 4.
+        assert calls["server_max_inflight"] == 8
         assert calls["backend_args"][0][0] == "http://127.0.0.1:30000"
         assert runtime_.backend.weight_version() == "7"
     finally:
@@ -182,6 +190,8 @@ def test_group_shares_slot_state_and_shifts_retry_workers(tmp_path, monkeypatch)
         "HARBORRL_NATIVE_MAX_ATTEMPTS": "2",
         "HARBORRL_NATIVE_GATEWAY_URL": "http://gateway:32123",
         "HARBORRL_NATIVE_GATEWAY_PORT": "32123",
+        # Fake runtimes carry no lease bookkeeping: pin static routing.
+        "HARBORRL_NATIVE_GATEWAY_ROUTING": "modulo",
         "HARBORRL_NATIVE_RUNNER_PYTHON": "/python",
         "HARBORRL_NATIVE_CATALOG": str(tmp_path / "catalog.json"),
         "HARBORRL_NATIVE_TOKENIZER_DIGEST": "0" * 64,
@@ -224,8 +234,11 @@ def test_group_shares_slot_state_and_shifts_retry_workers(tmp_path, monkeypatch)
     monkeypatch.setattr(rollout_runtime, "GroupSlots", fake_group_slots)
     monkeypatch.setattr(rollout_runtime, "run_attempt", fake_run_attempt)
 
-    runtime_ = SimpleNamespace(rollout_root=tmp_path, semaphore=asyncio.Semaphore(8),
-                               registry=SimpleNamespace(), profile={"model": "policy"})
+    runtime_ = SimpleNamespace(
+        rollout_root=tmp_path, semaphore=asyncio.Semaphore(8),
+        shards=(SimpleNamespace(name="gateway", url="http://gateway:32123",
+                                registry=SimpleNamespace()),),
+        profile={"model": "policy"})
 
     # The run owns its loaded profile; group setup must not reread the source file.
     profile.unlink()
@@ -257,6 +270,8 @@ def test_task_worker_override_wins(tmp_path, monkeypatch):
         "HARBORRL_NATIVE_TASK_WORKER_OVERRIDES": json.dumps({"task": "worker-b"}),
         "HARBORRL_NATIVE_GATEWAY_URL": "http://gateway:32123",
         "HARBORRL_NATIVE_GATEWAY_PORT": "32123", "HARBORRL_NATIVE_RUNNER_PYTHON": "/python",
+        # Fake runtimes carry no lease bookkeeping: pin static routing.
+        "HARBORRL_NATIVE_GATEWAY_ROUTING": "modulo",
         "HARBORRL_NATIVE_CATALOG": str(tmp_path / "catalog.json"),
         "HARBORRL_NATIVE_TOKENIZER_DIGEST": "0" * 64,
         "HARBORRL_NATIVE_TEMPLATE_DIGEST": "1" * 64,
@@ -286,8 +301,11 @@ def test_task_worker_override_wins(tmp_path, monkeypatch):
 
     monkeypatch.setattr(rollout_runtime, "GroupSlots", PermissiveSlots)
     monkeypatch.setattr(rollout_runtime, "run_attempt", fake_run_attempt)
-    runtime_ = SimpleNamespace(rollout_root=tmp_path, semaphore=asyncio.Semaphore(2),
-                               registry=SimpleNamespace(), profile={"model": "policy"})
+    runtime_ = SimpleNamespace(
+        rollout_root=tmp_path, semaphore=asyncio.Semaphore(2),
+        shards=(SimpleNamespace(name="gateway", url="http://gateway:32123",
+                                registry=SimpleNamespace()),),
+        profile={"model": "policy"})
     irs = asyncio.run(rollout_runtime.run_group(
         config, runtime_, entry=entry, group_index=0, rollout_id=0,
         sampling_digest="sampling", policy_version="1"))

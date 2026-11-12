@@ -82,27 +82,23 @@ async def run_attempt(identity, *, task_path, profile, gateway_url, runner_pytho
     credential = secrets.token_urlsafe(32)
     project = str(Path(__file__).resolve().parents[3])
     env = CLAUDE_CODE_HARNESS.adapter.runner_environment(os.environ)
-    env["PYTHONPATH"] = project
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (project, env.get('PYTHONPATH'))))
     stderr = (root / "runner.stderr").open("wb")
     try:
         command = runner_command(runner_python, project, runner_host)
         process = await asyncio.create_subprocess_exec(*command,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=stderr, env=env)
-    except BaseException:
+    except BaseException as exc:
         stderr.close()
-        publish(root / "launch-failed.json", {"identity": identity.to_dict(), "reason": "Runner process did not start"})
+        # A cancelled group kills sibling attempts while their runner process
+        # is still starting; that is not a launch failure and must not read
+        # as one in the shared evidence.
+        reason = "Runner launch cancelled" if isinstance(exc, asyncio.CancelledError) \
+            else "Runner process did not start"
+        publish(root / "launch-failed.json", {"identity": identity.to_dict(), "reason": reason})
         raise
-    registered, trial_id, lifecycle_timeout, sealed = False, None, False, False
+    registered, trial_id, lifecycle_timeout = False, None, False
     messages = []
-
-    def mark_cleanup(reason):
-        marker = root / "cleanup-required.json"
-        if not marker.exists():
-            publish(marker, {
-                "identity": identity.to_dict(), "trial_id": trial_id,
-                "runner_host": runner_host, "reason": reason,
-            })
-
     try:
         req = {"identity": identity.to_dict(), "task_path": str(Path(task_path).resolve()), "profile": profile,
                "gateway_url": gateway_url, "credential": credential, "output": str(root / "runner"),
@@ -110,9 +106,13 @@ async def run_attempt(identity, *, task_path, profile, gateway_url, runner_pytho
         if sandbox is not None:
             from harborrl.trajectories.native import digest
             req.update(sandbox=sandbox, runtime_digest=digest(sandbox))
-            timeout = (sandbox['create_timeout_s'] + sandbox['cleanup_timeout_s'] * 2
+            timeout = (max(sandbox['create_timeout_s'], profile.get('environment_timeout_sec', 0))
+                       + sandbox['cleanup_timeout_s'] * 2
                        + sum(profile[k] for k in ('setup_timeout_sec', 'agent_timeout_sec', 'verifier_timeout_sec')))
             cleanup_timeout = sandbox['cleanup_timeout_s'] + 15
+        elif 'environment_timeout_sec' in profile:
+            timeout = max(timeout, profile['environment_timeout_sec'] + cleanup_timeout * 2
+                          + sum(profile[k] for k in ('setup_timeout_sec', 'agent_timeout_sec', 'verifier_timeout_sec')))
         process.stdin.write(json.dumps(req).encode() + b"\n")
         await process.stdin.drain()
 
@@ -151,7 +151,7 @@ async def run_attempt(identity, *, task_path, profile, gateway_url, runner_pytho
             lifecycle_path = root / 'runner' / 'sandbox-lifecycle.json'
             lifecycle = read_json(lifecycle_path) if lifecycle_path.is_file() else {}
             if lifecycle.get('state') != 'deleted' or lifecycle.get('runtime_digest') != req['runtime_digest']:
-                mark_cleanup("Sandbox deletion unconfirmed")
+                publish(root / 'cleanup-required.json', {'identity': identity.to_dict(), 'reason': 'Sandbox deletion unconfirmed'})
                 raise RuntimeError('sandbox deletion unconfirmed')
         trial_dir = Path(terminal["trial_dir"]).resolve()
         result_path = Path(terminal["result_path"]).resolve()
@@ -159,16 +159,26 @@ async def run_attempt(identity, *, task_path, profile, gateway_url, runner_pytho
             raise ValueError("Runner result path is outside this attempt")
         sessions = list((trial_dir / "agent" / "sessions" / "projects").rglob("*.jsonl"))
         if len(sessions) != 1:
-            raise ValueError("expected exactly one native Claude session; auxiliary sessions require review")
+            from harborrl.trajectories.native import read_json
+            exception = read_json(result_path).get('exception_info')
+            if not sessions and exception:
+                error_type = exception.get('exception_type', 'unknown')
+                raise RuntimeError(f'native trial failed before session audit: {error_type}; inspect Harbor result and Sandbox lifecycle')
+            raise ValueError(f"expected exactly one native Claude session, found {len(sessions)}; auxiliary sessions require review")
         registry.wait_delivered(identity.attempt_id, 30.0)
-        audit = CLAUDE_CODE_HARNESS.adapter.audit_session(sessions[0], registry, identity.attempt_id)
-        receipt = collect(identity, trial_id, result_path, trial_dir / "verifier", reward_profile)
+        audit = CLAUDE_CODE_HARNESS.adapter.audit_session(
+            sessions[0], registry, identity.attempt_id, cli_version=profile['cli_version'])
         CLAUDE_CODE_HARNESS.adapter.audit_empty_final(
             trial_dir / "agent" / "claude-code.txt", registry, identity.attempt_id, audit)
         turns, seal = registry.seal(identity.attempt_id)
-        sealed = True
+        termination_evidence = CLAUDE_CODE_HARNESS.adapter.audit_termination(
+            trial_dir / 'agent/claude-code.txt', result_path, profile, audit, turns=turns)
+        receipt = collect(identity, trial_id, result_path, trial_dir / "verifier", reward_profile,
+                          termination_evidence=termination_evidence)
         publish(root / "evaluation.json", receipt)
-        ir = assemble(identity, trial_id, turns, seal, receipt)
+        ir = assemble(identity, trial_id, turns, seal, receipt,
+                      termination='budget_truncated' if termination_evidence else 'completed',
+                      termination_evidence=termination_evidence)
         publish(root / "trajectory.v2.json", ir)
         return ir
     except BaseException as exc:
@@ -176,8 +186,9 @@ async def run_attempt(identity, *, task_path, profile, gateway_url, runner_pytho
         publish(root / "failure.json", {"identity": identity.to_dict(), "error_type": type(exc).__name__})
         raise
     finally:
-        if (root / "runner" / "cleanup-required.json").exists():
-            mark_cleanup("Inspect runner/cleanup-required.json")
+        if (sandbox is not None and (root / 'runner' / 'cleanup-required.json').exists()
+                and not (root / 'cleanup-required.json').exists()):
+            publish(root / 'cleanup-required.json', {'identity': identity.to_dict(), 'reason': 'Inspect runner/cleanup-required.json'})
         if registered:
             registry.close(identity.attempt_id)
         if process.returncode is None:
@@ -191,10 +202,13 @@ async def run_attempt(identity, *, task_path, profile, gateway_url, runner_pytho
                 except ProcessLookupError:
                     pass
                 await process.wait()
-                mark_cleanup("Runner cleanup deadline exceeded; inspect Harbor resources before retry")
-        if process.returncode != 0 or lifecycle_timeout:
-            mark_cleanup("Runner exited abnormally; inspect Harbor resources before retry")
-        if registered and not sealed:
+                if not (root / "cleanup-required.json").exists():
+                    publish(root / "cleanup-required.json", {"identity": identity.to_dict(), "trial_id": trial_id,
+                        "reason": "Runner cleanup deadline exceeded; inspect Harbor resources before retry"})
+        if (process.returncode != 0 or lifecycle_timeout) and not (root / "cleanup-required.json").exists():
+            publish(root / "cleanup-required.json", {"identity": identity.to_dict(), "trial_id": trial_id,
+                "reason": "Runner exited abnormally; inspect Harbor resources before retry"})
+        if registered:
             try:
                 registry.seal(identity.attempt_id)
             except ValueError:

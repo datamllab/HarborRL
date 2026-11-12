@@ -60,7 +60,9 @@ def cross_checks(training, deployment):
         destinations = [schema.destination(worker["ssh"]) for worker in workers]
         require(harbor["workers"] == destinations, "training.harbor.workers",
                 "Must match deployment worker destinations in order")
-        require(harbor["python"] == workers[0]["runner_python"], "training.harbor.python",
+        import os
+        require(os.path.normpath(harbor["python"]) == os.path.normpath(workers[0]["runner_python"]),
+                "training.harbor.python",
                 "Must match the deployment's first runner_python")
     return checks
 

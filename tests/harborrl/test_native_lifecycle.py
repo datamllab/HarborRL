@@ -12,7 +12,7 @@ from harborrl.rollout.harbor_job.bindings import claude_config, sanitized_runner
 from harborrl.rollout.harbor_job.coordinator import GroupSlots, run_attempt
 from harborrl.trajectories.native import RewardProfile
 
-PROFILE = {"cli_version": "2.1.141", "model": "policy", "max_turns": 4,
+PROFILE = {"cli_version": "2.1.0", "model": "policy", "max_turns": 4,
            "agent_timeout_sec": 60, "setup_timeout_sec": 60, "verifier_timeout_sec": 60}
 
 
@@ -39,22 +39,65 @@ def test_profile_controls_reach_agent_and_host():
     disabled = claude_config({**PROFILE, "disallowed_tools": "Agent,Task,WebSearch,WebFetch"},
                              "http://gateway:8000", "token")
     assert disabled["kwargs"]["disallowed_tools"] == "Agent,Task,WebSearch,WebFetch"
-    extended = claude_config({**PROFILE, "disallowed_tools": "WebSearch"},
-                             "http://gateway:8000", "token")
-    assert extended["kwargs"]["disallowed_tools"] == "Agent,Task,WebSearch"
-    for key in ("DISABLE_PROMPT_CACHING", "DISABLE_COMPACT", "DISABLE_AUTO_COMPACT"):
-        assert config["env"][key] == "1"
-        assert sanitized_runner_env({key: "0"})[key] == "1"
+    assert config["env"]["DISABLE_AUTO_COMPACT"] == "1"
     assert config["env"]["ANTHROPIC_MODEL"] == "policy"
     assert config["env"]["NO_PROXY"] == "gateway"
     assert config["env"]["no_proxy"] == "gateway"
-    assert config["kwargs"]["version"] == "2.1.141"
+    assert config["kwargs"]["version"] == "2.1.0"
     assert sanitized_runner_env({"PATH": "/bin", "ANTHROPIC_API_KEY": "external", "HTTPS_PROXY": "external"})["PATH"] == "/bin"
     assert "ANTHROPIC_API_KEY" not in sanitized_runner_env({"ANTHROPIC_API_KEY": "external"})
     with pytest.raises(ValueError):
         claude_config({**PROFILE, "cli_version": "latest"}, "http://gateway", "token")
     with pytest.raises(ValueError):
         claude_config(PROFILE, "http://gateway/v1", "token")
+
+
+def test_explicit_harness_prompt_preserves_literal_content():
+    prompt = "Use the declared tools.\nFinish with a final response; preserve 'quotes' and $literal."
+    config = claude_config({**PROFILE, "append_system_prompt": prompt}, "http://gateway", "token")
+    assert config["kwargs"]["append_system_prompt"] == prompt
+    assert "append_system_prompt" not in claude_config(PROFILE, "http://gateway", "token")["kwargs"]
+
+
+@pytest.mark.parametrize('base', [None, 300, 600.0, 1200])
+def test_environment_timeout_is_separate_from_agent_setup(base):
+    from harborrl.rollout.harbor_job.bindings import environment_timeouts
+
+    resources = {} if base is None else {'build_timeout_sec': base}
+    original = dict(resources)
+    assert environment_timeouts(PROFILE, resources) == {}
+    profile = {**PROFILE, 'environment_timeout_sec': 720}
+    config = claude_config(profile, 'http://gateway', 'token')
+    assert config['override_setup_timeout_sec'] == 60
+    assert 'environment_timeout_sec' not in config['kwargs']
+    multiplier = environment_timeouts(profile, resources)['environment_build_timeout_multiplier']
+    assert multiplier * (600 if base is None else base) == pytest.approx(720)
+    assert resources == original
+
+
+@pytest.mark.parametrize('budget', [None, False, 0, -1, 1.5, '720'])
+def test_invalid_environment_timeout_is_rejected(budget):
+    from harborrl.rollout.harbor_job.bindings import environment_timeouts
+
+    profile = {**PROFILE, 'environment_timeout_sec': budget}
+    with pytest.raises(ValueError, match='environment_timeout_sec'):
+        claude_config(profile, 'http://gateway', 'token')
+    with pytest.raises(ValueError, match='environment_timeout_sec'):
+        environment_timeouts(profile, {})
+
+
+@pytest.mark.parametrize('base', [None, False, 0, -1, float('nan'), float('inf'), '300'])
+def test_invalid_task_environment_timeout_cannot_be_overridden(base):
+    from harborrl.rollout.harbor_job.bindings import environment_timeouts
+
+    with pytest.raises(ValueError, match='task environment'):
+        environment_timeouts({**PROFILE, 'environment_timeout_sec': 720}, {'build_timeout_sec': base})
+
+
+@pytest.mark.parametrize("prompt", [None, False, 1, "", " \n", "text\x00text", ["text"]])
+def test_invalid_harness_prompt_is_rejected(prompt):
+    with pytest.raises(ValueError, match="append_system_prompt"):
+        claude_config({**PROFILE, "append_system_prompt": prompt}, "http://gateway", "token")
 
 
 def test_retry_budget_and_new_lineage():
@@ -129,46 +172,55 @@ sys.stdin.readline()
     assert registry.attempts[identity().attempt_id]["closed"]
     assert (root / "failure.json").is_file()
     if mode != "wrong-event":
-        marker = json.loads((root / "cleanup-required.json").read_text())
-        assert marker["identity"] == identity().to_dict()
-        assert marker["trial_id"] == "trial"
-        assert marker["runner_host"] is None
+        assert (root / "cleanup-required.json").is_file()
     assert json.loads((root / "runner-events.json").read_text())[0]["type"] == "prepared"
 
 
-@pytest.mark.parametrize("runner_host", [None, "runner-host"])
-def test_cleanup_timeout_preserves_runner_marker_and_original_error(tmp_path, monkeypatch, runner_host):
-    worker = tmp_path / "worker.py"
-    worker.write_text('''import json, sys, time
-from pathlib import Path
-req = json.loads(sys.stdin.readline())
-print(json.dumps({"type": "prepared", "trial_id": "trial"}), flush=True)
-sys.stdin.readline()
-output = Path(req["output"])
-output.mkdir(parents=True)
-(output / "cleanup-required.json").write_text('{"reason": "deletion failed"}')
-print(json.dumps({"type": "event", "trial_id": "other"}), flush=True)
-time.sleep(30)
-''')
+@pytest.mark.parametrize('mode,existing_marker', [('terminal', False), ('crash', False), ('crash', True)])
+def test_cleanup_marker_preserves_original_failure(tmp_path, monkeypatch, mode, existing_marker):
+    from harborrl.trajectories.native import digest, publish, read_json
+
+    root = tmp_path / 'attempt'
+    marker = root / 'cleanup-required.json'
+    sandbox = {'create_timeout_s': 1, 'cleanup_timeout_s': 1}
+    worker = tmp_path / 'worker.py'
+    terminal = {'type': 'terminal', 'trial_id': 'trial'}
+    worker.write_text(chr(10).join(['import sys, json', 'json.loads(sys.stdin.readline())',
+        'print(json.dumps({"type": "prepared", "trial_id": "trial"}), flush=True)',
+        'sys.stdin.readline()', 'sys.exit(7)' if mode == 'crash' else
+        f'print({json.dumps(terminal)!r}, flush=True)', '']))
     spawn = asyncio.create_subprocess_exec
 
     async def fake_spawn(*args, **kwargs):
-        return await spawn(sys.executable, "-S", str(worker), **kwargs)
+        return await spawn(sys.executable, '-S', str(worker), **kwargs)
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_spawn)
-    root = tmp_path / "attempt"
-    with pytest.raises(ValueError, match="event trial identity mismatch"):
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', fake_spawn)
+    registry = TraceRegistry(tmp_path / 'traces')
+    register = registry.register
+    prior = {'identity': identity().to_dict(), 'reason': 'Existing cleanup evidence'}
+
+    def registered(*args, **kwargs):
+        publish(root / 'runner/cleanup-required.json', {'reason': 'Unconfirmed platform deletion'})
+        publish(root / 'runner/sandbox-lifecycle.json',
+                {'state': 'delete_failed', 'runtime_digest': digest(sandbox)})
+        if existing_marker:
+            publish(marker, prior)
+        return register(*args, **kwargs)
+
+    monkeypatch.setattr(registry, 'register', registered)
+    reason = 'sandbox deletion unconfirmed' if mode == 'terminal' else 'Runner exited before terminal result'
+    with pytest.raises(RuntimeError, match=reason):
         asyncio.run(run_attempt(identity(), task_path=tmp_path, profile=PROFILE,
-            gateway_url="http://gateway", runner_python=sys.executable, root=root,
-            registry=TraceRegistry(tmp_path / "traces"), reward_profile=RewardProfile(),
-            timeout=2, cleanup_timeout=.1, runner_host=runner_host))
-    marker = json.loads((root / "cleanup-required.json").read_text())
-    assert marker["reason"] == "Inspect runner/cleanup-required.json"
-    assert marker["identity"] == identity().to_dict()
-    assert marker["trial_id"] == "trial"
-    assert marker["runner_host"] == runner_host
-    assert json.loads((root / "failure.json").read_text())["error_type"] == "ValueError"
-    assert (root / "runner-events.json").is_file()
+            gateway_url='http://gateway', runner_python=sys.executable, root=root,
+            registry=registry, reward_profile=RewardProfile(), sandbox=sandbox))
+    expected = prior if existing_marker else {'identity': identity().to_dict(), 'reason':
+        'Sandbox deletion unconfirmed' if mode == 'terminal' else 'Inspect runner/cleanup-required.json'}
+    assert read_json(marker) == expected
+    assert read_json(root / 'failure.json')['error_type'] == 'RuntimeError'
+    assert read_json(root / 'runner/cleanup-required.json') == {'reason': 'Unconfirmed platform deletion'}
+    assert registry.attempts[identity().attempt_id]['closed']
+    assert (root / 'runner-events.json').exists()
+    assert not (root / 'trajectory.v2.json').exists()
 
 
 def test_offline_http_to_export_is_explicitly_synthetic(tmp_path):

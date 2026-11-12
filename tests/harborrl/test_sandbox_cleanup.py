@@ -34,3 +34,21 @@ def test_allocated_id_cleanup_requires_confirmed_absence(tmp_path, monkeypatch, 
     assert env.record['state'] == expected
     assert (tmp_path / 'cleanup-required.json').exists() == (expected == 'delete_failed')
     assert calls[:2] == [('GET', '/v1/sandboxes/sbx-owned'), ('DELETE', '/v1/sandboxes/sbx-owned')]
+
+
+def test_startup_failure_preserves_cause_types_without_sdk_secrets(tmp_path):
+    import json
+
+    env = object.__new__(ManagedOpenSandboxEnvironment)
+    env.cfg = {'create_timeout_s': 600, 'request_timeout_s': 180}
+    env.evidence = tmp_path
+    env.record = {'sandbox_id': 'sbx-owned'}
+    cause = httpx.ReadTimeout('private token and signed URL')
+    outer = RuntimeError('secret response body')
+    outer.__cause__ = cause
+    env.startup_failed('create', outer)
+    text = (tmp_path / 'sandbox-startup-failed.json').read_text()
+    assert 'private token' not in text and 'secret response' not in text
+    assert json.loads(text) == {'stage': 'create', 'sandbox_id': 'sbx-owned',
+        'causes': [{'error_type': 'RuntimeError'}, {'error_type': 'ReadTimeout'}],
+        'create_timeout_s': 600, 'request_timeout_s': 180}

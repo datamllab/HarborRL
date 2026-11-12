@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 
 import yaml
 
-from harborrl.tasks.content import tomllib
+from harborrl.tasks.content import tomllib, tree_digest
 
 
 def _check_options(value):
@@ -58,8 +58,9 @@ def load_sandbox(path):
     if not isinstance(bindings, list) or not bindings:
         raise ValueError('sandbox image bindings required')
     images = set()
+    task_digests = set()
     for binding in bindings:
-        if not isinstance(binding, dict) or set(binding) - {'image', 'max_live_instances', 'options'} or not {'image', 'max_live_instances'} <= set(binding):
+        if not isinstance(binding, dict) or set(binding) - {'image', 'max_live_instances', 'options', 'task_digests'} or not {'image', 'max_live_instances'} <= set(binding):
             raise ValueError('invalid sandbox binding fields')
         binding.setdefault('options', {})
         _check_options(binding['options'])
@@ -68,6 +69,15 @@ def load_sandbox(path):
             raise ValueError('invalid or duplicate sandbox image binding')
         if type(binding['max_live_instances']) is not int or binding['max_live_instances'] <= 0:
             raise ValueError('binding max_live_instances must be positive')
+        if 'task_digests' in binding:
+            digests = binding['task_digests']
+            if (not isinstance(digests, list) or not digests or any(
+                    not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{64}', value)
+                    for value in digests)):
+                raise ValueError('binding task_digests must be a nonempty list of SHA256 digests')
+            if len(set(digests)) != len(digests) or task_digests.intersection(digests):
+                raise ValueError('duplicate sandbox task digest binding')
+            task_digests.update(digests)
         images.add(binding['image'])
     install = cfg['installation']
     if install is None:
@@ -84,10 +94,15 @@ def load_sandbox(path):
 
 
 def task_binding(cfg, task_path):
+    if any(binding.get('task_digests') for binding in cfg['bindings']):
+        task_digest = tree_digest(Path(task_path))
+        for binding in cfg['bindings']:
+            if task_digest in binding.get('task_digests', ()):
+                return binding
     spec = tomllib.loads((Path(task_path) / 'task.toml').read_text())
     image = spec.get('environment', {}).get('docker_image')
     for binding in cfg['bindings']:
-        if image == binding['image']:
+        if image == binding['image'] and not binding.get('task_digests'):
             return binding
     raise ValueError('sandbox task requires a prebuilt image with an exact binding')
 
@@ -120,12 +135,7 @@ class SandboxAdmission:
     def __init__(self, cfg):
         self.total = asyncio.Semaphore(cfg['max_live_instances'])
         self.bindings = {b['image']: asyncio.Semaphore(b['max_live_instances']) for b in cfg['bindings']}
-        self.cleanup_markers = set()
-
-    @property
-    def blocked(self):
-        self.cleanup_markers = {path for path in self.cleanup_markers if path.exists()}
-        return bool(self.cleanup_markers)
+        self.blocked = False
 
     @asynccontextmanager
     async def lease(self, binding, root):
@@ -136,4 +146,5 @@ class SandboxAdmission:
             try:
                 yield
             finally:
-                self.cleanup_markers.update(Path(root).rglob('cleanup-required.json'))
+                if (Path(root) / 'cleanup-required.json').exists():
+                    self.blocked = True

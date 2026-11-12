@@ -2026,7 +2026,21 @@ separate action. Command examples use POSIX shell quoting.</p>
 
 
                 
-              </article>
+              
+<h2 id="ai-assisted-deployment">AI-assisted deployment</h2>
+<p>To have an AI agent help deploy this repository and verify training, ask it to read
+<a href="../agents/environment-check/">docs/agents/environment-check.md</a> and follow it exactly.</p>
+<p>Give the agent this prompt, replacing the bracketed values with your topology:</p>
+<pre><code>Read docs/agents/environment-check.md and follow it exactly.
+Target: [CPU development only | native split CPU-rollout/GPU-training deployment]
+Config: &lt;Path to config.yaml&gt;, or none
+Topology: controller=&lt;Your IP address&gt;:&lt;Port Number&gt;;
+  rollout workers=&lt;Rollout worker IP address&gt;:&lt;Port Number&gt;;
+  GPU machine=&lt;GPU machine IP address&gt;:&lt;Port Number&gt;
+
+First run read-only checks only. Return the required structured report and tell
+me the smallest next command that fixes one blocker.</code></pre>
+</article>
             </div>
           
           

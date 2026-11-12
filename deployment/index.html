@@ -1984,7 +1984,24 @@ does not establish learning improvement.</p>
 
 
                 
-              </article>
+              
+<h2 id="gateway-sharding">Gateway sharding</h2>
+<p>The rollout gateway can split behind a routing facade into multiple shards, each with exclusive ports and immutable trace subtrees. Three modes are supported:</p>
+<ul>
+<li><strong>Static routing</strong> (<code>modulo</code> or <code>worker_affinity</code>): a declared shard table assigns every runner to a named gateway.</li>
+<li><strong>Elastic auto-growth</strong> (<code>auto</code>): the runtime spawns additional gateways when concurrent sandbox attempts exceed <code>sandboxes_per_shard</code>, preferring declared <code>gateway_hosts</code> (remote-first) before growing locally. Idle shards are retired at group settlement.</li>
+<li><strong>Remote shards</strong>: independent processes (<code>shard_service</code>) joined to the live admission epoch over an admin HTTP plane.</li>
+</ul>
+
+<h2 id="hub-mode">Hub deployment mode</h2>
+<p>For clusters where dynamic rjob containers have no fixed address and workers sit behind one-way firewalls, the manager runs as a persistent daemon and all nodes pull tasks over HTTP:</p>
+<ul>
+<li>GPU and rollout workers poll <code>GET /pull/{gpu,rollout}_task</code> with a single <code>X-Api-Key</code> header.</li>
+<li>Results flow back via <code>POST /report/*</code>.</li>
+<li>Rollout execution is worker-hosted: each task runs against a locally constructed gateway with its own <code>TraceRegistry</code>.</li>
+</ul>
+<p>Configure with <code>manager.mode: hub</code> in the deployment YAML. See the <a href="https://github.com/datamllab/HarborRL/blob/main/harborrl/deployment/hub_server.py">hub server source</a> for the full API contract.</p>
+</article>
             </div>
           
           

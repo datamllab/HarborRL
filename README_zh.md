@@ -44,11 +44,6 @@ HarborRL 支持 **Models × Algorithms × Tasks × Harnesses (MATH)** 的灵活�
 - **Tasks：**在隔离 worker 中对 **200+** 个 Harbor 格式任务进行 RL 训练，包括 Terminal-Bench、SWE-Bench、Deep-SWE 等。
 - **Harnesses：**支持 **40+** 个 harness 框架进行 RL 训练，包括 Claude Code、Codex、LangGraph、SWE-agent 等。
 
-## AI 辅助配置
-
-使用 `harborrl options` 离线浏览能力，`harborrl init` 交互式或答案文件配置，`harborrl web` 打开本地控制台。完整工作流（含 AI 代理部署）见[配置指南](docs/configuration-wizard.md)。
-
-
 ## 快速开始
 
 默认 CPU 安装不需要 Sandbox SDK 或集群账号。
@@ -102,6 +97,35 @@ bash scripts/launch_native.sh --config <Path to config.yaml> --backends <Path to
 ```
 
 命令方式是基于当前目录 `config.yaml`（或通过 `--config` 选择的文件）的简写形式，用于选择四个实验维度。YAML 方式是完整的启动定义，还会固定 checkpoint、worker、serving 设置、GPU 拓扑、采样限制和输出位置。可以从[示例配置](examples/native/train_qwen_native.yaml)开始，并把站点专属文件保存在仓库外。
+
+## 操作演示
+
+下面两段 25 秒动画分别通过 CLI 和 Web 控制台展示同一个 CPU Hello World 示例：运行任务、查看验证器奖励，并找到导出的 GRPO batch。示例使用脚本化任务执行和预设 token，不执行模型推理或 GPU 训练。
+
+### 命令行
+
+完成[安装](#安装)后运行：
+
+```bash
+uv run harborrl hello --out-dir demo/hello
+```
+
+![HarborRL CLI 演示：运行 Hello World、查看奖励 0 和 1，并列出导出文件](assets/demos/harborrl-cli-zh.gif)
+
+### Web 控制台
+
+启动本地控制台，点击 **Run Hello World**，即可查看运行状态、日志和产物目录：
+
+```bash
+uv run harborrl web
+```
+
+![HarborRL Web 演示：运行 Hello World，查看成功状态、验证器奖励及产物目录](assets/demos/harborrl-web-zh.gif)
+
+## AI 辅助配置
+
+使用 `harborrl options` 离线浏览能力，`harborrl init` 交互式或答案文件配置，`harborrl web` 打开本地控制台。完整工作流（含 AI 代理部署）见[配置指南](docs/configuration-wizard.md)。
+
 
 ## 任务配置
 

@@ -44,11 +44,6 @@ HarborRL supports flexible combinations of **Models × Algorithms × Tasks × Ha
 - **Tasks:** RL training on **200+** Harbor-format tasks in isolated workers, including Terminal-Bench, SWE-Bench, Deep-SWE, and more.
 - **Harnesses:** RL training with **40+** harness frameworks, including Claude Code, Codex, LangGraph, SWE-agent, and more.
 
-## AI-assisted Configure
-
-Use `harborrl options` to browse capabilities offline, `harborrl init` for interactive or answer-file setup, and `harborrl web` for the local console. See the [configuration guide](docs/configuration-wizard.md) for the full workflow including AI-agent deployment.
-
-
 ## Quick Start
 
 The default CPU install does not need a Sandbox SDK or cluster account.
@@ -104,6 +99,35 @@ bash scripts/launch_native.sh --config <Path to config.yaml> --backends <Path to
 ```
 
 The command style is a shorthand over `config.yaml` in the working directory (or the file selected with `--config`) and selects the four experiment dimensions. The YAML style is the complete launch definition: it also pins checkpoints, workers, serving settings, GPU topology, sampling limits, and output locations. Start from [examples/native/train_qwen_native.yaml](examples/native/train_qwen_native.yaml) and keep site-specific files outside the repository.
+
+## See HarborRL in Action
+
+These 25-second walkthroughs show the same CPU Hello World example through the CLI and Web console: run a task, inspect verifier rewards, and find the exported GRPO batch. The example uses scripted task execution and fixture tokens; it does not run model inference or GPU training.
+
+### Command line
+
+After [installation](#install), run:
+
+```bash
+uv run harborrl hello --out-dir demo/hello
+```
+
+![HarborRL CLI demo: run Hello World, inspect rewards 0 and 1, and list the exported files](assets/demos/harborrl-cli-en.gif)
+
+### Web console
+
+Start the local console, click **Run Hello World**, and inspect the run status, logs, and artifact directory:
+
+```bash
+uv run harborrl web
+```
+
+![HarborRL Web demo: run Hello World and view the successful run, verifier rewards, and artifact directory](assets/demos/harborrl-web-en.gif)
+
+## AI-assisted Configure
+
+Use `harborrl options` to browse capabilities offline, `harborrl init` for interactive or answer-file setup, and `harborrl web` for the local console. See the [configuration guide](docs/configuration-wizard.md) for the full workflow including AI-agent deployment.
+
 
 ## Task Configuration
 

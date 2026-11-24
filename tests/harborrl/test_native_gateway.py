@@ -203,9 +203,19 @@ def test_pool_mismatch_keeps_admission_closed(tmp_path):
     assert not registry.accepting
 
 
-def test_http_overload_rejects_before_any_attempt_state(tmp_path):
+def test_http_overload_rejects_before_any_attempt_state(tmp_path, monkeypatch):
     _registry, _ident, token, gateway = setup(tmp_path)
     started, release = threading.Event(), threading.Event()
+    released = threading.Event()
+    permit = threading.BoundedSemaphore(1)
+    release_permit = permit.release
+
+    def finish_request():
+        release_permit()
+        released.set()
+
+    monkeypatch.setattr(permit, 'release', finish_request)
+    monkeypatch.setattr('harborrl.gateway.server.threading.BoundedSemaphore', lambda _: permit)
 
     class BlockingBackend(Backend):
         def generate(self, converted, ident, response_id):
@@ -244,6 +254,9 @@ def test_http_overload_rejects_before_any_attempt_state(tmp_path):
         release.set()
         first.join(10)
         assert not errors and results and results[0]["role"] == "assistant"
+        # Receiving the body can precede the server's delivery bookkeeping
+        # and semaphore release. Retry only after the first handler finishes.
+        assert released.wait(5), "first request did not release its admission slot"
         # The rejected request never began a generation, so a retry is safe.
         post()
         assert len(results) == 2

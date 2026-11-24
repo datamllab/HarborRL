@@ -13,9 +13,10 @@ from dataclasses import replace
 from pathlib import Path
 
 from harborrl.math_registry import CLAUDE_CODE_HARNESS
-from harborrl.trajectories.native import assemble, publish
+from harborrl.trajectories.native import assemble, publish, validate_v2
 
 from .collector import collect
+from .reliability import GatewayTransportFailure
 
 
 class GroupSlots:
@@ -65,12 +66,49 @@ class GroupSlots:
         return export_group([self.completed[slot] for slot in self.identities], len(self.identities))
 
 
-def runner_command(runner_python, project, runner_host=None, *, module="harborrl.rollout.harbor_job.runner"):
+def runner_command(runner_python, project, runner_host=None, *,
+                   module="harborrl.rollout.harbor_job.runner", extra_args=()):
     if runner_host is None:
-        return [runner_python, "-m", module]
-    remote = f"cd {shlex.quote(str(project))} && exec {shlex.quote(runner_python)} -m {module}"
+        return [runner_python, "-m", module, *extra_args]
+    remote = (f"cd {shlex.quote(str(project))} && exec "
+              + shlex.join([runner_python, '-m', module, *extra_args]))
     return ["ssh", "-o", "BatchMode=yes", "-o", "ClearAllForwardings=yes",
             "-o", "StrictHostKeyChecking=accept-new", runner_host, remote]
+
+
+async def reconcile_runner(sandbox, root, runner_python, project, runner_host, env):
+    """A fresh host-side observer, outside the terminated runner and its SDK."""
+    from .reconcile import cleanup_resolved
+    command = runner_command(runner_python, project, runner_host,
+        module='harborrl.rollout.harbor_job.reconcile', extra_args=(str(root),))
+    with (root / 'reconciliation.stderr').open('wb') as stderr:
+        process = await asyncio.create_subprocess_exec(
+            *command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL,
+            stderr=stderr, env=env)
+        try:
+            await asyncio.wait_for(process.communicate(json.dumps(sandbox).encode() + b'\n'),
+                                   sandbox['cleanup_timeout_s'] * 2 + 30)
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+    return process.returncode == 0 and cleanup_resolved(root)
+
+
+async def settle_reconciliation(*args, propagate_cancel=True):
+    task = asyncio.create_task(reconcile_runner(*args))
+    cancelled = False
+    while True:
+        try:
+            result = await asyncio.shield(task)
+            break
+        except asyncio.CancelledError:
+            cancelled = True
+            if task.cancelled():
+                raise
+    if cancelled and propagate_cancel:
+        raise asyncio.CancelledError
+    return result
 
 
 async def run_attempt(identity, *, task_path, profile, gateway_url, runner_python,
@@ -98,6 +136,7 @@ async def run_attempt(identity, *, task_path, profile, gateway_url, runner_pytho
         publish(root / "launch-failed.json", {"identity": identity.to_dict(), "reason": reason})
         raise
     registered, trial_id, lifecycle_timeout = False, None, False
+    reconciliation_started = False
     messages = []
     try:
         req = {"identity": identity.to_dict(), "task_path": str(Path(task_path).resolve()), "profile": profile,
@@ -144,15 +183,15 @@ async def run_attempt(identity, *, task_path, profile, gateway_url, runner_pytho
         registry.close(identity.attempt_id)
         # Do not kill a serving thread: drain safely or leave a blocking cleanup record.
         await asyncio.wait_for(process.wait(), cleanup_timeout)
+        if sandbox is not None:
+            reconciliation_started = True
+            if not await settle_reconciliation(sandbox, root, runner_python, project, runner_host, env):
+                publish(root / 'cleanup-required.json', {'identity': identity.to_dict(), 'reason': 'Sandbox deletion unconfirmed'})
+                raise RuntimeError('independent sandbox deletion unconfirmed')
+        if registry.has_nontransport_failure(identity.attempt_id):
+            raise ValueError('Gateway recorded a non-transport generation failure; retry forbidden')
         if process.returncode != 0 or terminal["type"] != "terminal":
             raise RuntimeError("native trial did not finish normally")
-        if sandbox is not None:
-            from harborrl.trajectories.native import read_json
-            lifecycle_path = root / 'runner' / 'sandbox-lifecycle.json'
-            lifecycle = read_json(lifecycle_path) if lifecycle_path.is_file() else {}
-            if lifecycle.get('state') != 'deleted' or lifecycle.get('runtime_digest') != req['runtime_digest']:
-                publish(root / 'cleanup-required.json', {'identity': identity.to_dict(), 'reason': 'Sandbox deletion unconfirmed'})
-                raise RuntimeError('sandbox deletion unconfirmed')
         trial_dir = Path(terminal["trial_dir"]).resolve()
         result_path = Path(terminal["result_path"]).resolve()
         if not trial_dir.is_relative_to(root / "runner" / "harbor") or result_path != trial_dir / "result.json":
@@ -180,17 +219,27 @@ async def run_attempt(identity, *, task_path, profile, gateway_url, runner_pytho
                       termination='budget_truncated' if termination_evidence else 'completed',
                       termination_evidence=termination_evidence)
         publish(root / "trajectory.v2.json", ir)
+        if (registry.transport_failure_only(identity.attempt_id)
+                and validate_v2(ir) == ['trace_not_sealed']):
+            # Keep the rejected trace immutable. Only a fresh attempt can recover.
+            raise GatewayTransportFailure('upstream transport failed; retained trace is ineligible')
         return ir
     except BaseException as exc:
         lifecycle_timeout = isinstance(exc, (asyncio.TimeoutError, asyncio.CancelledError))
+        if (registered and not isinstance(exc, (ValueError, asyncio.CancelledError))
+                and registry.has_nontransport_failure(identity.attempt_id)):
+            publish(root / "failure.json", {"identity": identity.to_dict(),
+                    "error_type": "ValueError", "cause_type": type(exc).__name__})
+            raise ValueError('Gateway recorded a non-transport generation failure; retry forbidden') from exc
         publish(root / "failure.json", {"identity": identity.to_dict(), "error_type": type(exc).__name__})
         raise
     finally:
-        if (sandbox is not None and (root / 'runner' / 'cleanup-required.json').exists()
-                and not (root / 'cleanup-required.json').exists()):
-            publish(root / 'cleanup-required.json', {'identity': identity.to_dict(), 'reason': 'Inspect runner/cleanup-required.json'})
         if registered:
             registry.close(identity.attempt_id)
+        if ((root / 'runner/cleanup-required.json').exists()
+                and not (root / 'cleanup-required.json').exists()):
+            publish(root / 'cleanup-required.json', {
+                'identity': identity.to_dict(), 'reason': 'Inspect runner/cleanup-required.json'})
         if process.returncode is None:
             try:
                 process.stdin.write(b'{"command":"cancel"}\n')
@@ -208,6 +257,29 @@ async def run_attempt(identity, *, task_path, profile, gateway_url, runner_pytho
         if (process.returncode != 0 or lifecycle_timeout) and not (root / "cleanup-required.json").exists():
             publish(root / "cleanup-required.json", {"identity": identity.to_dict(), "trial_id": trial_id,
                 "reason": "Runner exited abnormally; inspect Harbor resources before retry"})
+        if sandbox is not None and not reconciliation_started:
+            async def finish_cleanup():
+                try:
+                    return await reconcile_runner(sandbox, root, runner_python, project, runner_host, env)
+                except Exception:  # noqa: BLE001 - cleanup failure must retain admission debt
+                    return False
+            cleanup = asyncio.create_task(finish_cleanup())
+            while True:
+                try:
+                    resolved = await asyncio.shield(cleanup)
+                    break
+                except asyncio.CancelledError:
+                    if cleanup.cancelled():
+                        raise
+                    continue
+            if not resolved and not (root / 'cleanup-required.json').exists():
+                publish(root / 'cleanup-required.json', {
+                    'identity': identity.to_dict(), 'reason': 'Independent reconciliation unresolved'})
+        if sandbox is not None:
+            from .reconcile import cleanup_resolved
+            if not cleanup_resolved(root) and not (root / 'cleanup-required.json').exists():
+                publish(root / 'cleanup-required.json', {
+                    'identity': identity.to_dict(), 'reason': 'Independent reconciliation unresolved'})
         if registered:
             try:
                 registry.seal(identity.attempt_id)

@@ -118,7 +118,8 @@ class TraceRegistry:
                 f.write("single writer\n")
             self.version = identity.policy_version
             self.attempts[identity.attempt_id] = {"identity": identity, "trial_id": trial_id, "root": root,
-                "pending": set(), "turns": [], "errors": [], "closed": False, "sealed": False, "credential": key}
+                "pending": set(), "turns": [], "errors": [], "failures": [],
+                "closed": False, "sealed": False, "credential": key}
             self.credentials[key] = identity.attempt_id
             return token
 
@@ -144,19 +145,40 @@ class TraceRegistry:
             state["pending"].add(request_id)
             return aid, request_id, state["identity"], state["trial_id"]
 
-    def finish(self, aid, request_id, turn=None, error=None):
+    def finish(self, aid, request_id, turn=None, error=None, *, failure_kind=None):
         with self.changed:
             state = self.attempts[aid]
             if request_id not in state["pending"]:
                 raise ValueError("request not pending")
             if error:
                 state["errors"].append(error)
+                state['failures'].append({'request_id': request_id, 'error': error,
+                                          'kind': failure_kind})
             if turn is not None:
                 state["turns"].append(deepcopy(turn))
-            publish(state["root"] / "generated" / f"{request_id}.json", {"turn": turn, "error": error})
+            publish(state["root"] / "generated" / f"{request_id}.json", {"turn": turn, "error": error,
+                    **({'failure_kind': failure_kind} if failure_kind else {})})
             if error:
                 state["pending"].remove(request_id)
                 self.changed.notify_all()
+
+    def has_nontransport_failure(self, aid):
+        """A known contract failure vetoes retries even when the CLI exits first."""
+        with self.lock:
+            state = self.attempts[aid]
+            return (state['errors'] != [failure['error'] for failure in state['failures']]
+                    or any(failure['kind'] != 'upstream-transport' for failure in state['failures']))
+
+    def transport_failure_only(self, aid):
+        """Use trusted backend observations, not exception names from an IR."""
+        with self.lock:
+            state = self.attempts[aid]
+            failures = state['failures']
+            return (state['closed'] and state['sealed'] and not state['pending']
+                    and bool(failures)
+                    and state['errors'] == [failure['error'] for failure in failures]
+                    and all(failure['kind'] == 'upstream-transport' for failure in failures)
+                    and all(turn.get('delivery') == 'consumed_confirmed' for turn in state['turns']))
 
     def delivery(self, aid, response_id, status):
         with self.changed:

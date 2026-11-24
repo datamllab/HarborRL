@@ -40,6 +40,7 @@ docs/agents/*
 !docs/deployment.md
 !docs/math-distill.md
 !docs/sandbox-rollout.md
+!docs/rollout-runtime-lifecycle.md
 !docs/train-inference-consistency.md
 !docs/web-console.md
 practices/**/VALIDATION.md

@@ -86,6 +86,58 @@ def test_cached_runtime_rejects_foreign_loop_and_config(tmp_path, monkeypatch):
         runtime.close_runtime()
 
 
+def test_slime_hook_reuses_runtime_across_rollouts_and_closes_after_failure(tmp_path, monkeypatch):
+    from harborrl.backends.slime_v032 import rollout
+
+    runtime.close_runtime()
+    config, tokenizer = cached_runtime_fixture(tmp_path, monkeypatch)
+    args = SimpleNamespace(rollout_batch_size=1, n_samples_per_prompt=2)
+    source = SimpleNamespace(get_samples=lambda _: [[object(), object()]])
+    seen, loops, completed = [], [], []
+    fail = False
+
+    async def runner(args_, groups, policy_version):
+        current = await runtime.runtime(config, tokenizer=tokenizer)
+        seen.append(current)
+        loops.append(asyncio.get_running_loop())
+
+        async def slot(index):
+            async with current.semaphore:
+                await asyncio.sleep(.001)
+                completed.append(index)
+
+        await asyncio.gather(slot(0), slot(1))
+        if fail:
+            raise ValueError('rollout failed')
+        return []
+
+    monkeypatch.setattr(rollout, 'lock_policy_version', lambda _: '1')
+    monkeypatch.setattr(rollout, 'export_training_batch', lambda *a, **k: object())
+    monkeypatch.setattr(rollout, 'to_slime_samples', lambda *a, **k: [])
+    monkeypatch.setattr(rollout, 'collect_metrics', lambda *a, **k: {})
+
+    def generate(index):
+        return rollout.generate_rollout(args, index, source, runner=runner,
+                                        output_factory=SimpleNamespace)
+
+    try:
+        for index in range(3):
+            assert generate(index).samples == []
+        assert len({id(item) for item in seen}) == 1
+        assert len({id(loop) for loop in loops}) == 1
+        assert completed == [0, 1] * 3
+        fail = True
+        with pytest.raises(ValueError, match='rollout failed'):
+            generate(3)
+        assert loops[0].is_closed()
+        assert runtime._RUNTIME is None and runtime._EMBEDDED_LOOP is None
+        fail = False
+        generate(4)
+        assert seen[-1] is not seen[0] and loops[-1] is not loops[0]
+    finally:
+        runtime.close_runtime()
+
+
 def test_embedded_shutdown_awaits_tasks_before_closing_gateway(monkeypatch):
     runtime.close_runtime()
     events = []

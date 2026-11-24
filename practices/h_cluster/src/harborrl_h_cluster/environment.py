@@ -91,8 +91,9 @@ class BrainboxEnvironment(ManagedOpenSandboxEnvironment):
     def extensions(self):
         return {'environmentId': self.binding['options']['environment_id']}
 
-    def api_params(self):
-        return {'project': self.cfg['options']['project']}
+    @classmethod
+    def cleanup_api_params(cls, cfg):
+        return {'project': cfg['options']['project']}
 
     def startup_transport(self, allocated):
         return SandboxStartupTransport(self.cfg['domain'].rstrip('/') + '/v1', allocated,

@@ -15,12 +15,14 @@ FIELDS = {
     'harbor': {'python', 'version', 'workers', 'runner_transport', 'environment'},
     'gateway': {'host', 'port', 'advertised_url', 'tokenizer_digest', 'template_digest', 'audited_raw_logprobs'},
     'model': {'checkpoint', 'reference', 'args_file'},
-    'training': {'num_rollout', 'learning_rate', 'save_interval', 'backend_contract', 'seed', 'export_hf'},
+    'training': {'num_rollout', 'learning_rate', 'save_interval', 'backend_contract', 'seed', 'export_hf',
+                 'resume', 'max_tokens_per_gpu', 'max_ckpt_keep'},
     'sampling': {'group_size', 'groups_per_batch', 'max_attempts', 'max_tokens', 'max_context'},
     'deployment': {'layout', 'num_gpus', 'actor_gpus', 'rollout_gpus', 'actor_tensor_parallel_size', 'rollout_gpus_per_engine'},
     'output': {'root'},
 }
-OPTIONAL = {'harbor': {'runner_transport', 'environment'}, 'training': {'seed', 'export_hf'}}
+OPTIONAL = {'harbor': {'runner_transport', 'environment'},
+            'training': {'seed', 'export_hf', 'resume', 'max_tokens_per_gpu', 'max_ckpt_keep'}}
 
 
 class SelectedConfig(dict):
@@ -77,20 +79,27 @@ def validate(config, path):
     config['training'].setdefault(
         'backend_contract', 'slime-v0.3.2-native-v1')
     config['training'].setdefault('export_hf', False)
+    config['training'].setdefault('resume', None)
+    config['training'].setdefault('max_tokens_per_gpu', 16384)
+    config['training'].setdefault('max_ckpt_keep', 2)
     for section, fields in FIELDS.items():
         actual = set(config[section]) if isinstance(config[section], dict) else set()
         if not isinstance(config[section], dict) or not fields - OPTIONAL.get(section, set()) <= actual <= fields:
             raise ValueError(f'{section} requires exactly {sorted(fields)}')
     for section, key in [('tasks','catalog'), ('harness','profile'), ('harbor','python'),
-                         ('model','checkpoint'), ('model','reference'), ('output','root')]:
+                         ('model','checkpoint'), ('model','reference'), ('output','root'),
+                         ('training','resume')]:
         value = config[section][key]
-        if not isinstance(value, str) or not value:
+        if (section, key) == ('training', 'resume') and value is None:
+            continue
+        if not isinstance(value, str) or not value.strip():
             raise ValueError(f'{section}.{key} must be a path')
         expanded = Path(value).expanduser()
         absolute = expanded if expanded.is_absolute() else Path(path).parent / expanded
         config[section][key] = str(Path(os.path.abspath(absolute)))
     for section, keys in [('sampling', FIELDS['sampling']), ('deployment', FIELDS['deployment'] - {'layout'}),
-                          ('training', {'num_rollout','save_interval'}), ('gateway', {'port'})]:
+                          ('training', {'num_rollout','save_interval','max_tokens_per_gpu','max_ckpt_keep'}),
+                          ('gateway', {'port'})]:
         for key in keys:
             if type(config[section][key]) is not int or config[section][key] <= 0:
                 raise ValueError(f'{section}.{key} must be a positive integer')
@@ -132,7 +141,7 @@ def validate(config, path):
     if d['actor_gpus'] % d['actor_tensor_parallel_size'] or d['rollout_gpus'] % d['rollout_gpus_per_engine']:
         raise ValueError('deployment GPU counts must be divisible by their tensor parallel sizes')
     preset = config['model']['args_file']
-    if not isinstance(preset,str) or not re.fullmatch(r'[A-Za-z0-9_-]+',preset):
+    if not isinstance(preset,str) or not re.fullmatch(r'[A-Za-z0-9._-]+',preset):
         raise ValueError('model.args_file must name a Slime model preset; SLIME_DIR is checked by doctor')
     for key in ('tokenizer_digest', 'template_digest'):
         if not re.fullmatch(r'[0-9a-f]{64}', g[key]):

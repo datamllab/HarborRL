@@ -65,10 +65,6 @@ CKPT_ARGS=(
   --megatron-to-hf-mode bridge
   --save "${CKPT_ROOT}/${RUN_ID:-run}"
   --save-interval "${SAVE_INTERVAL}"
-  --max-ckpt-keep "${MAX_CKPT_KEEP:-2}"
-  --checkpoint-min-free-gb "${CHECKPOINT_MIN_FREE_GB:-128}"
-  --checkpoint-expected-gb "${CHECKPOINT_EXPECTED_GB:-0}"
-  --checkpoint-space-margin-ratio "${CHECKPOINT_SPACE_MARGIN_RATIO:-1.15}"
 )
 if [[ -n "${RESUME_LOAD:-}" ]]; then
   CKPT_ARGS+=(--load "${RESUME_LOAD}" --use-checkpoint-opt-param-scheduler)
@@ -215,16 +211,28 @@ export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 ENTRY=("${SLIME_DIR}/train.py")
 if [[ "${HARBORRL_CONSISTENCY_MODE:-off}" != "off" ]]; then
   ENTRY=(-m harborrl.consistency.train)
+elif [[ -n "${HARBORRL_HUB_ENV_FILE:-}" || -n "${HARBORRL_HUB_URL:-}" ]]; then
+  ENTRY=(-m harborrl.platform.hub_train)
 fi
+GUARD_ARGS=(
+  --checkpoint-root "${CKPT_ROOT}/${RUN_ID:-run}" --keep "${MAX_CKPT_KEEP:-2}"
+  --min-free-gb "${CHECKPOINT_MIN_FREE_GB:-128}"
+  --expected-gb "${CHECKPOINT_EXPECTED_GB:-0}"
+  --margin "${CHECKPOINT_SPACE_MARGIN_RATIO:-1.15}"
+)
+[[ -z "${RESUME_LOAD:-}" ]] || GUARD_ARGS+=(--resume-root "${RESUME_LOAD}")
+[[ -z "${SAVE_HF:-}" ]] || GUARD_ARGS+=(--hf-template "${SAVE_HF}")
+COMMAND=("${TRAIN_PYTHON}" -u -m harborrl.platform.checkpoint_guard "${GUARD_ARGS[@]}"
+  -- "${TRAIN_PYTHON}" -u "${ENTRY[@]}" "${TRAIN_ARGS[@]}")
 
 "${TRAIN_PYTHON}" -m harborrl.platform.evidence "${RUN_DIR}" "${DRY_RUN:-0}" \
-  "${TRAIN_PYTHON}" -u "${ENTRY[@]}" "${TRAIN_ARGS[@]}"
+  "${COMMAND[@]}"
 
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
   printf '[dry-run] '
-  printf '%q ' "${TRAIN_PYTHON}" -u "${ENTRY[@]}" "${TRAIN_ARGS[@]}"
+  printf '%q ' "${COMMAND[@]}"
   printf '\n'
   exit 0
 fi
 
-exec "${TRAIN_PYTHON}" -u "${ENTRY[@]}" "${TRAIN_ARGS[@]}"
+exec "${COMMAND[@]}"

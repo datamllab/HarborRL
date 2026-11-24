@@ -66,6 +66,10 @@ class ManagedOpenSandboxEnvironment(OpenSandboxEnvironment):
         return {}
 
     def api_params(self):
+        return self.cleanup_api_params(self.cfg)
+
+    @classmethod
+    def cleanup_api_params(cls, cfg):
         return {}
 
     def startup_transport(self, allocated):
@@ -230,7 +234,6 @@ class ManagedOpenSandboxEnvironment(OpenSandboxEnvironment):
         try:
             await asyncio.wait_for(sandbox.kill(), self.cfg['cleanup_timeout_s'])
             self.record_state('deleted')
-            (self.evidence / 'cleanup-required.json').unlink(missing_ok=True)
             self._sandbox = None
         except BaseException:  # noqa: BLE001 - preserve cleanup debt on cancellation
             self.record_state('delete_failed')

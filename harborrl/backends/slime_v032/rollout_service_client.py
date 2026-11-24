@@ -75,7 +75,9 @@ def service_group_request(group, sampling_params, rollout_id, policy_version):
     if len(indexes) != 1 or type(next(iter(indexes), None)) is not int:
         raise ValueError("Slime must provide one group identity before native generation")
     index = indexes.pop()
-    return {
+    from harborrl.rollout.generations import ACTIVE_GENERATION, generation_group_id
+    context = ACTIVE_GENERATION.get()
+    payload = {
         "group_id": f"group-{index}",
         "rollout_id": int(rollout_id),
         "group_index": index,
@@ -85,6 +87,10 @@ def service_group_request(group, sampling_params, rollout_id, policy_version):
                      ("temperature", "top_p", "top_k", "max_new_tokens", "stop")},
         "slots": [{"slot_id": str(slot)} for slot in range(len(group))],
     }
+    if context is not None:
+        payload['rollout_generation'] = context['generation']
+        payload['group_id'] = generation_group_id(rollout_id, context['generation'], index)
+    return payload
 
 
 class RolloutServiceClient:
@@ -214,6 +220,11 @@ def load_group_result(run_id, group_request, result, *, allow_synthetic=False):
                 f"slot {descriptor['slot_id']} identity differs from the request")
         try:
             require_ready(payload, allow_synthetic=allow_synthetic)
+            if 'rollout_generation' in group_request:
+                from harborrl.rollout.generations import generation_batch_id
+                if identity.get('batch_id') != generation_batch_id(
+                        group_request['rollout_id'], group_request['rollout_generation']):
+                    raise ValueError('slot belongs to a different rollout generation')
         except ValueError as exc:
             raise ServiceRolloutError(f"slot {descriptor['slot_id']}: {exc}") from exc
         trajectories.append(payload)

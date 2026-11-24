@@ -32,6 +32,11 @@ def test_gsm8k_numeric_verifier(response, reference, status):
     assert result["reward"] == (1.0 if status == "correct" else 0.0)
 
 
+@pytest.mark.parametrize("response", ["####16", "work\n####16\n", "#### 16"])
+def test_gsm8k_accepts_marker_without_space(response):
+    assert verify(response, "16", "gsm8k_numeric_v1")["status"] == "correct"
+
+
 def test_verifier_version_is_locked_in_task_import(tmp_path):
     row = {**load_tasks(ROOT / "examples/math/tasks.jsonl")[0], "verifier": "gsm8k_numeric_v1"}
     tasks = tmp_path / "tasks.jsonl"
@@ -46,6 +51,38 @@ def test_verifier_version_is_locked_in_task_import(tmp_path):
     assert verify(r"\boxed{2} done", "2")["status"] == "unparseable"
     with pytest.raises(ValueError, match="Unsupported numeric verifier"):
         verify("2", "2", "unknown")
+
+
+math_verify = pytest.importorskip("math_verify", reason="math_latex_v1 cases need math_verify")
+
+
+@pytest.mark.parametrize("response,reference,status", [
+    (r"The sum is $\frac{1}{2}$", r"\frac{1}{2}", "correct"),
+    (r"so the answer is 0.5", r"\frac{1}{2}", "correct"),
+    (r"$\boxed{\sqrt{12}}$", r"2\sqrt{3}", "correct"),
+    (r"$\boxed{5}$", "5", "correct"),
+    (r"#### 5", "5", "correct"),
+    (r"$\boxed{6}$", "5", "incorrect"),
+    ("I cannot solve this", "5", "unparseable"),
+    ("x" * 20000, "5", "unsupported"),
+])
+def test_math_latex_verifier(response, reference, status):
+    result = verify(response, reference, "math_latex_v1")
+    assert result["status"] == status
+    assert result["verifier"] == "math_latex_v1"
+    assert result["reward"] == (1.0 if status == "correct" else 0.0)
+
+
+def test_math_latex_reference_validation(tmp_path):
+    row = {**load_tasks(ROOT / "examples/math/tasks.jsonl")[0], "task_id": "math-latex-1",
+           "problem_id": "math-latex-1", "verifier": "math_latex_v1", "reference": r"2\sqrt{3}"}
+    tasks = tmp_path / "tasks.jsonl"
+    tasks.write_text(json.dumps(row))
+    assert load_tasks(tasks)[0]["reference"] == r"2\sqrt{3}"
+    row["reference"] = "line\nbreak"
+    tasks.write_text(json.dumps(row))
+    with pytest.raises(ValueError, match="bounded single-line LaTeX"):
+        load_tasks(tasks)
 
 
 def test_split_lock_and_curated_import(tmp_path):

@@ -119,6 +119,11 @@ class HubManager:
         self.gpu_pool: Dict[str, GpuResource] = {}
         self.gpu_tasks: Dict[str, GpuTask] = {}
         self.rollout_tasks: Dict[str, RolloutTask] = {}
+        # Idempotency index for rollout submissions: (run_id, rollout_id,
+        # group_id, slot_id) -> task_id. Retried submits of the same logical
+        # slot must not enqueue a second worker execution.
+        self.rollout_index: Dict[str, str] = {}
+        self.reports_path = self.run_root / "hub-rollout-reports.jsonl"
         self.lock = threading.RLock()
 
         # Initialize GPU pool from config
@@ -389,8 +394,16 @@ class HubManager:
             return {"task_id": task_id, "acknowledged": True}
 
     def submit_rollout_task(self, run_id: str, group_request: dict) -> dict:
-        """Submit a rollout group task for worker processing."""
+        """Submit a rollout attempt task for worker processing (idempotent per slot)."""
         with self.lock:
+            idem = "%s:%s:%s:%s" % (run_id,
+                                    group_request.get("rollout_id", ""),
+                                    group_request.get("group_id", ""),
+                                    group_request.get("slot_id", ""))
+            existing = self.rollout_index.get(idem)
+            if existing is not None and existing in self.rollout_tasks:
+                task = self.rollout_tasks[existing]
+                return {"task_id": existing, "status": task.status, "deduplicated": True}
             task_id = f"rollout_{secrets.token_hex(8)}"
             task = RolloutTask(
                 task_id=task_id,
@@ -399,6 +412,7 @@ class HubManager:
                 request=group_request
             )
             self.rollout_tasks[task_id] = task
+            self.rollout_index[idem] = task_id
 
             # Link to run
             run_info = self.runs.get(run_id)
@@ -436,7 +450,7 @@ class HubManager:
             }
 
     def report_rollout_result(self, worker_id: str, task_id: str, result: dict) -> dict:
-        """Rollout worker reports task completion."""
+        """Rollout worker reports task completion; results are journaled."""
         with self.lock:
             task = self.rollout_tasks.get(task_id)
             if task is None or task.worker_id != worker_id:
@@ -451,7 +465,35 @@ class HubManager:
                 task.error = result.get("error", "unknown error")
             task.completed_at = time.time()
 
+            # Journal the terminal state so a hub restart cannot erase which
+            # attempts already ran; the trainer treats the JSONL as evidence.
+            record = {"task_id": task_id, "run_id": task.run_id,
+                      "group_id": task.group_id, "worker_id": worker_id,
+                      "status": task.status, "error": task.error,
+                      "result": result, "reported_at": task.completed_at}
+            self.run_root.mkdir(parents=True, exist_ok=True)
+            with self.reports_path.open("a", encoding="utf-8") as journal:
+                journal.write(json.dumps(record, ensure_ascii=False) + "\n")
+
             return {"task_id": task_id, "acknowledged": True}
+
+    def rollout_task_status(self, task_ids: list) -> dict:
+        """Batch status query used by the training side to collect results."""
+        with self.lock:
+            statuses = {}
+            for task_id in task_ids:
+                task = self.rollout_tasks.get(task_id)
+                if task is None:
+                    statuses[task_id] = {"status": "unknown"}
+                    continue
+                statuses[task_id] = {
+                    "status": task.status,
+                    "run_id": task.run_id,
+                    "group_id": task.group_id,
+                    "result": task.result,
+                    "error": task.error,
+                }
+            return {"tasks": statuses}
 
 
 def make_hub_server(hub_manager: HubManager, host: str = "0.0.0.0", port: int = 0,
@@ -571,6 +613,11 @@ def make_hub_server(hub_manager: HubManager, host: str = "0.0.0.0", port: int = 
                         body["task_id"],
                         body["result"]
                     )
+                    return self.reply(200, result)
+
+                elif path == "/hub/rollout_tasks/status":
+                    body = self._read_json_body()
+                    result = hub_manager.rollout_task_status(body.get("task_ids", []))
                     return self.reply(200, result)
 
                 elif path == "/hub/rollout_tasks":

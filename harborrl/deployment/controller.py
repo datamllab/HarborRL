@@ -22,7 +22,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from harborrl.config import ROOT
-from harborrl.deployment import remote
+from harborrl.deployment import provision, remote
+from harborrl.deployment.preflight import gpu_checks
 from harborrl.deployment.schema import destination
 from harborrl.deployment.training_target import SshTrainingTarget
 from harborrl.platform.evidence import (
@@ -362,42 +363,58 @@ def dispatch_hub(plan, deployment, *, checks):
 
 def dispatch_service(plan, deployment, *, checks):
     manager, gpu, storage = deployment["manager"], deployment["gpu_target"], deployment["storage"]
-    
-    # Hub mode: submit to long-running manager instead of direct execution
-    mode = manager.get("mode")
-    if mode == "hub":
+    if manager.get("mode") == "hub":
         return dispatch_hub(plan, deployment, checks=checks)
-    
-    # Standard service mode execution
     config = plan["config"]
     root = new_run_root(storage["run_root"])
     root.mkdir(parents=True, mode=0o700)
     run_id = root.name
-    # Concurrent dispatches on one manager must not collide on the declared
-    # ports; patch every consumer's view before the environment is rendered.
-    deployment = _with_allocated_ports(deployment, run_id)
-    manager = deployment["manager"]
-
-    catalog_path, prompt_path = _materialize(plan, root)
-    source = _source_audit(root)
-    environment = run_environment(plan, root, catalog_path, prompt_path)
-    token = _ensure_token(manager["run_token_file"])
-    environment = _rollout_environment(plan, deployment, environment)
-
-    sampling = config["sampling"]
-    concurrency = sampling["group_size"] * sampling["groups_per_batch"]
-    service = RolloutService(
-        run_root=root,
-        runtime_factory=_runtime_factory(
-            deployment, environment,
-            concurrency_limit=concurrency, group_size=sampling["group_size"]),
-        token_file=manager["run_token_file"])
-    control = make_control_server(service, host=manager["bind"],
-                                  port=manager["control_port"])
-    control_thread = None
-    target = None
+    provision_spec = gpu.get("provision")
+    provision_record = None
+    service = control = control_thread = target = None
     exit_code = 1
     try:
+        # Concurrent dispatches on one manager must not collide on the declared
+        # ports; patch every consumer's view before the environment is rendered.
+        # Allocation is per-run state, so it runs inside the guarded region: a
+        # partial allocation would otherwise strand slots for the life of the
+        # manager process, and repeated failures would exhaust the range.
+        deployment = _with_allocated_ports(deployment, run_id)
+        manager, gpu = deployment["manager"], deployment["gpu_target"]
+        if provision_spec is not None:
+            # The machine does not exist until up returns, so nothing may dial
+            # it before this point; the record is evidence the moment it is
+            # obtained, and down runs however this dispatch ends.
+            provision_record = provision.up(
+                provision_spec, evidence_path=root / "gpu-provision.json")
+            gpu = {**gpu, "ssh": provision.ssh_spec(provision_record)}
+            deployment = {**deployment, "gpu_target": gpu}
+            # The checks deferred at plan time are exactly the ones that need a
+            # live machine; rerun them now and fail before any launch.
+            checks = list(checks) + gpu_checks(plan, deployment)
+            failed = [check for check in checks if not check["ok"]]
+            if failed:
+                raise RuntimeError(
+                    "provisioned GPU target failed preflight: "
+                    + "; ".join(f"{check['check']}: {check['detail']}"
+                                for check in failed))
+
+        catalog_path, prompt_path = _materialize(plan, root)
+        source = _source_audit(root)
+        environment = run_environment(plan, root, catalog_path, prompt_path)
+        token = _ensure_token(manager["run_token_file"])
+        environment = _rollout_environment(plan, deployment, environment)
+
+        sampling = config["sampling"]
+        concurrency = sampling["group_size"] * sampling["groups_per_batch"]
+        service = RolloutService(
+            run_root=root,
+            runtime_factory=_runtime_factory(
+                deployment, environment,
+                concurrency_limit=concurrency, group_size=sampling["group_size"]),
+            token_file=manager["run_token_file"])
+        control = make_control_server(service, host=manager["bind"],
+                                      port=manager["control_port"])
         service.register_run(run_id, {
             "run_id": run_id, "deployment_source": plan["deployment"]["source"],
             "source_commit": source["commit"],
@@ -455,11 +472,25 @@ def dispatch_service(plan, deployment, *, checks):
     finally:
         with contextlib.suppress(Exception):
             service.drain_run(run_id)
-        service.close()
+        cleanup_error = None
+        actions = []
+        if service is not None:
+            actions.append(service.close)
         if control_thread is not None:
-            control.shutdown()
-            control_thread.join(5)
-        control.server_close()
-        _release_run_ports(run_id)
+            actions.extend([control.shutdown, lambda: control_thread.join(5)])
+        if control is not None:
+            actions.append(control.server_close)
+        if provision_record is not None:
+            actions.append(lambda: provision.down(
+                provision_spec, provision_record,
+                evidence_path=root / "gpu-provision-release.json"))
+        actions.append(lambda: _release_run_ports(run_id))
+        for action in actions:
+            try:
+                action()
+            except Exception as exc:
+                cleanup_error = cleanup_error or exc
         print(json.dumps({"run_dir": str(root), "exit_code": exit_code}), file=sys.stderr)
+        if cleanup_error is not None and sys.exc_info()[0] is None:
+            raise cleanup_error
     return exit_code

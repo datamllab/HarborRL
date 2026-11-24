@@ -1,13 +1,26 @@
 """Bounded stdlib HTTP transport. All policy requests require attempt credentials."""
+import errno
 import json
 import secrets
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 
 from harborrl.trajectories.native import digest, encode
 
 from .messages import ProtocolError, convert, sse_events
+
+
+def _transport_failure(error):
+    if isinstance(error, HTTPError):
+        return error.code in {408, 429, 500, 502, 503, 504}
+    if isinstance(error, URLError):
+        return isinstance(error.reason, OSError) and _transport_failure(error.reason)
+    # Restrict this classification to the backend call, never trace persistence.
+    return isinstance(error, (ConnectionError, TimeoutError)) or (type(error) is OSError
+        and error.errno in {None, errno.ECONNRESET, errno.ECONNREFUSED, errno.ETIMEDOUT,
+                            errno.EHOSTUNREACH, errno.ENETUNREACH, errno.EPIPE})
 
 
 class Gateway:
@@ -17,12 +30,18 @@ class Gateway:
 
     def generate(self, token, payload):
         aid, rid, identity, trial = self.registry.begin(token)
+        failure_kind = None
         try:
             converted = convert(payload, model=self.model, max_output_tokens=self.max_output_tokens)
             if digest(converted["sampling"]) != identity.sampling_digest:
                 raise ProtocolError("sampling parameters differ from attempt manifest")
             response_id = "msg_" + secrets.token_hex(16)
-            generated = self.backend.generate(converted, identity, response_id)
+            try:
+                generated = self.backend.generate(converted, identity, response_id)
+            except Exception as exc:
+                if _transport_failure(exc):
+                    failure_kind = 'upstream-transport'
+                raise
             if generated.get("policy_version") != identity.policy_version:
                 raise ValueError("generation policy version mismatch")
             message = {"id": response_id, "type": "message", "role": "assistant", "model": self.model,
@@ -38,7 +57,7 @@ class Gateway:
             return aid, message
         except BaseException as exc:
             # Deliberately retain failed generation in the seal, even if CLI retries.
-            self.registry.finish(aid, rid, error=type(exc).__name__)
+            self.registry.finish(aid, rid, error=type(exc).__name__, failure_kind=failure_kind)
             raise
 
     def count_tokens(self, token, payload):

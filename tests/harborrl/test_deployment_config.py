@@ -77,6 +77,22 @@ def test_valid_deployment_normalizes_and_summarizes(tmp_path):
     assert summary(config, "deployment.yaml")["digest"] == plan_summary["digest"]
 
 
+def test_hub_deployment_retains_pull_configuration(tmp_path):
+    raw = deployment_mapping(tmp_path)
+    gpu = dict(raw['gpu_target'], transport='http_pull', ssh=None)
+    raw['gpu_target'] = gpu
+    raw['manager'].update(mode='hub', hub_port=49300,
+                          hub_url='http://manager-a:49300',
+                          gpu_pool=[dict(gpu, pull_url='http://manager-a:49300')])
+    raw['rollout'] = dict(provider='hub_pull', workers=[])
+    actual = validate(raw)
+    assert actual['manager']['mode'] == 'hub'
+    assert actual['manager']['hub_url'] == 'http://manager-a:49300'
+    assert actual['manager']['gpu_pool'][0]['transport'] == 'http_pull'
+    assert actual['gpu_target']['transport'] == 'http_pull'
+    assert actual['rollout']['provider'] == 'hub_pull'
+
+
 @pytest.mark.parametrize("mutation, message", [
     ({"manager": {"mode": "service", "control_url": "http://127.0.0.1:49200"}}, "loopback"),
     ({"manager": {"control_url": "http://manager-a:49300"}}, "matching its declared port"),

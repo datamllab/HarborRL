@@ -788,7 +788,7 @@ def test_failed_attempt_releases_its_gateway_lease(tmp_path, monkeypatch):
     async def flaky_attempt(identity, **kwargs):
         calls.append(identity.slot_id)
         if identity.slot_id == "0" and calls.count("0") == 1:
-            raise ValueError("sandbox exploded")
+            raise RuntimeError("sandbox transport failed")
         await asyncio.sleep(0)
         return {"identity": identity.to_dict()}
 
@@ -883,7 +883,7 @@ def test_failed_group_settlement_still_retires_spawned_gateways(tmp_path, monkey
 
     async def broken_attempt(identity, **kwargs):
         await asyncio.sleep(0)  # overlap so gw1 spawns before both fail
-        raise ValueError("sandbox exploded")
+        raise RuntimeError("sandbox transport failed")
 
     monkeypatch.setattr(rollout_runtime, "GroupSlots", PermissiveSlots)
     monkeypatch.setattr(rollout_runtime, "run_attempt", broken_attempt)

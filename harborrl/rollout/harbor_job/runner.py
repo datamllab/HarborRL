@@ -53,6 +53,9 @@ async def execute(request, emit, read_command):
     publish(root / "manifest.json", {"identity": identity.to_dict(), "task": inspection,
                                      "profile": request["profile"], "gateway_url": request["gateway_url"]})
     sandbox = request.get('sandbox')
+    if sandbox is not None:
+        publish(root / 'sandbox-lifecycle.json', {
+            'state': 'pending', 'sandbox_id': None, 'runtime_digest': digest(sandbox)})
     agent_gateway = request['gateway_url']
     if sandbox is not None:
         from harborrl.rollout.harbor_job.sandbox_config import environment_class
@@ -158,6 +161,9 @@ async def worker():
         sys.__stdout__.write(json.dumps(value) + "\n")
         sys.__stdout__.flush()
     first = await read()
+    if first.get('sandbox') is not None:
+        from harborrl.rollout.harbor_job.reconcile import register_runner
+        register_runner(Path(first['output']).parent, first['identity'])
     with contextlib.redirect_stdout(sys.stderr):
         await execute(first, emit, read)
 

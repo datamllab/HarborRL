@@ -56,7 +56,8 @@ class ServiceError(Exception):
 
 
 def validate_group_request(request):
-    if not isinstance(request, dict) or set(request) != GROUP_REQUEST_KEYS:
+    if (not isinstance(request, dict) or not GROUP_REQUEST_KEYS <= set(request)
+            or set(request) - GROUP_REQUEST_KEYS - {'rollout_generation'}):
         raise ServiceError(400, "invalid_request",
                            f"group request requires exactly {sorted(GROUP_REQUEST_KEYS)}")
     for key in ("group_id", "policy_version"):
@@ -67,6 +68,12 @@ def validate_group_request(request):
     for key in ("rollout_id", "group_index"):
         if type(request[key]) is not int or request[key] < 0:
             raise ServiceError(400, "invalid_request", f"{key} must be a nonnegative integer")
+    if 'rollout_generation' in request:
+        from harborrl.rollout.generations import generation_group_id
+        generation = request['rollout_generation']
+        if type(generation) is not int or generation < 0 or request['group_id'] != generation_group_id(
+                request['rollout_id'], generation, request['group_index']):
+            raise ServiceError(400, 'invalid_request', 'invalid rollout generation identity')
     task = request["task"]
     if not isinstance(task, dict) or set(task) != TASK_ENTRY_KEYS:
         raise ServiceError(400, "invalid_request",
@@ -155,10 +162,22 @@ def build_group_result(run_id, request, trajectories, *, runtime, export=None):
 
 async def default_executor(config, runtime_, request):
     """The production executor: the framework-free rollout core."""
-    return await run_group(
-        config, runtime_, entry=request["task"], group_index=request["group_index"],
-        rollout_id=request["rollout_id"], sampling_digest=digest(canonical_sampling(request["sampling"])),
-        policy_version=request["policy_version"], group_size=len(request["slots"]))
+    from harborrl.rollout.generations import ACTIVE_GENERATION, GenerationPolicy
+    token = None
+    if 'rollout_generation' in request:
+        policy = GenerationPolicy(**(config.generation_policy or {}))
+        token = ACTIVE_GENERATION.set({'generation': request['rollout_generation'],
+            'policy_version': request['policy_version'],
+            'max_attempts': policy.max_attempts_per_rollout,
+            'max_failed_groups': policy.max_failed_groups_per_rollout})
+    try:
+        return await run_group(
+            config, runtime_, entry=request["task"], group_index=request["group_index"],
+            rollout_id=request["rollout_id"], sampling_digest=digest(canonical_sampling(request["sampling"])),
+            policy_version=request["policy_version"], group_size=len(request["slots"]))
+    finally:
+        if token is not None:
+            ACTIVE_GENERATION.reset(token)
 
 
 @dataclass
@@ -168,6 +187,7 @@ class GroupState:
     status: str = "queued"
     result: dict = None
     error: str = None
+    failure_code: str = None
     created_at: float = field(default_factory=time.time)
     future: object = None
     task: object = None
@@ -179,6 +199,8 @@ class GroupState:
                    "created_at": self.created_at}
         if self.error:
             payload["error"] = self.error
+        if self.failure_code:
+            payload['failure_code'] = self.failure_code
         if include_result and self.result is not None:
             payload["result"] = self.result
         return payload
@@ -590,6 +612,9 @@ class RolloutService:
             # recorded as a failed group instead of killing the service
             group.status = "failed"
             group.error = f"{type(exc).__name__}: {exc}"
+            from harborrl.rollout.harbor_job.reliability import RetryableRolloutFailure
+            group.failure_code = ('retryable_infrastructure' if isinstance(exc, RetryableRolloutFailure)
+                                  else 'non_retryable')
             publish(directory / "failed.json", group.summary(include_result=False))
 
     def group_status(self, run_id, group_id):

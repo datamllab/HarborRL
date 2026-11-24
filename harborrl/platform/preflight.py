@@ -66,7 +66,8 @@ def _doctor(plan, *, math_only=False):
     explicit = deployment is not None and plan.get("deployment", {}).get(
         "source", "embedded-local") != "embedded-local"
     local_gpu = deployment is None or deployment["gpu_target"]["transport"] == "local"
-    legacy_workers = (not explicit) or deployment["rollout"]["provider"] in ("embedded", "sandbox")
+    legacy_workers = (not explicit) or deployment["rollout"]["provider"] in (
+        "embedded", "sandbox", "hub_pull")
 
     if explicit:
         from harborrl.deployment.preflight import preflight as deployment_preflight

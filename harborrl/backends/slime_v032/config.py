@@ -10,6 +10,8 @@ CONFIG_ENV = {
     "MODEL_TAG": ("model", "args_file"),
     "NUM_ROLLOUT": ("training", "num_rollout"),
     "SAVE_INTERVAL": ("training", "save_interval"),
+    "MAX_TOKENS_PER_GPU": ("training", "max_tokens_per_gpu"),
+    "MAX_CKPT_KEEP": ("training", "max_ckpt_keep"),
     "LR": ("training", "learning_rate"),
     "ROLLOUT_BATCH_SIZE": ("sampling", "groups_per_batch"),
     "N_SAMPLES": ("sampling", "group_size"),
@@ -93,6 +95,8 @@ def launch_plan(config):
     environment['HARBORRL_NATIVE_RUNNER_TRANSPORT'] = c['harbor'].get('runner_transport', 'ssh')
     if c['training'].get('seed') is not None:
         environment['HARBORRL_TRAINING_SEED'] = c['training']['seed']
+    if c['training'].get('resume') is not None:
+        environment['RESUME_LOAD'] = c['training']['resume']
     if sandbox is not None:
         environment['HARBORRL_NATIVE_SANDBOX'] = json.dumps(sandbox, sort_keys=True)
     return {'config': config, 'math': selection.asdict(),
@@ -121,6 +125,7 @@ def field_usage():
         "training.backend_contract": ["environment:HARBORRL_NATIVE_SLIME_CONTRACT", "preflight:backend hooks"],
         "training.seed": ["environment:HARBORRL_TRAINING_SEED"],
         "training.export_hf": ["run_environment:SAVE_HF"],
+        "training.resume": ["environment:RESUME_LOAD"],
         "harbor.workers": ["environment:HARBORRL_NATIVE_RUNNER_WORKERS", "preflight:worker probe"],
         "harbor.runner_transport": ["environment:HARBORRL_NATIVE_RUNNER_TRANSPORT"],
         "harbor.environment": ["environment:HARBORRL_NATIVE_SANDBOX", "runner:environment"],

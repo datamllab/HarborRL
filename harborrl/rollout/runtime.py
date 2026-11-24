@@ -33,6 +33,14 @@ from harborrl.trajectories.native import (
     publish,
     read_json,
 )
+from harborrl.rollout.harbor_job.reliability import (
+    CleanupUnresolved,
+    InfraBudget,
+    InfraBudgetExhausted,
+    ReliabilityLedger,
+    RetryableRolloutFailure,
+    RetryPolicy,
+)
 
 TASK_ENTRY_KEYS = {"id", "revision", "path", "task_digest", "reward_profile"}
 SHARD_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
@@ -176,6 +184,9 @@ class RolloutRuntimeConfig:
     gateway_hosts: tuple = ()
     hf_ckpt: str = None
     shard_python: str = None
+    reliability_policy: dict = None
+    infra_budget: dict = None
+    generation_policy: dict = None
 
     def __post_init__(self):
         if self.sampling_seed is not None and (
@@ -302,6 +313,16 @@ class RolloutRuntimeConfig:
         # more. A declared table keeps the historical static default.
         declared_routing = env.get("HARBORRL_NATIVE_GATEWAY_ROUTING")
         declared_routing = declared_routing.strip() if isinstance(declared_routing, str) else ""
+        try:
+            reliability_policy = json.loads(env.get("HARBORRL_NATIVE_RELIABILITY_POLICY") or "null")
+            infra_budget = json.loads(env.get("HARBORRL_NATIVE_INFRA_BUDGET") or "null")
+            generation_policy = json.loads(env.get('HARBORRL_NATIVE_GENERATION_POLICY') or 'null')
+        except ValueError as exc:
+            raise ValueError("invalid reliability control configuration") from exc
+        if reliability_policy is not None and not isinstance(reliability_policy, dict):
+            raise ValueError("reliability policy must be a JSON object")
+        if infra_budget is not None and not isinstance(infra_budget, dict):
+            raise ValueError("infrastructure budget must be a JSON object")
         return cls(
             run_id=cls._required(env, "RUN_ID"),
             run_root=cls._required(env, "RUN_DIR"),
@@ -321,7 +342,7 @@ class RolloutRuntimeConfig:
             runner_python=runner_python,
             workers=tuple(workers),
             task_worker_overrides=dict(overrides),
-            max_attempts=int(env.get("HARBORRL_NATIVE_MAX_ATTEMPTS", "2")),
+            max_attempts=int(env.get("HARBORRL_NATIVE_MAX_ATTEMPTS", "3")),
             max_output_tokens=int(env.get("ROLLOUT_MAX_RESPONSE_LEN", "8192")),
             max_context=int(env.get("ROLLOUT_MAX_CONTEXT_LEN", "32768")),
             concurrency_limit=max(1, int(concurrency_limit)),
@@ -336,6 +357,9 @@ class RolloutRuntimeConfig:
             runner_transport=env.get('HARBORRL_NATIVE_RUNNER_TRANSPORT', 'ssh'),
             sampling_seed=(int(env['HARBORRL_TRAINING_SEED'])
                            if 'HARBORRL_TRAINING_SEED' in env else None),
+            reliability_policy=reliability_policy,
+            infra_budget=infra_budget,
+            generation_policy=generation_policy,
         )
 
     @staticmethod
@@ -427,6 +451,12 @@ class RolloutRuntimeConfig:
                if self.shard_python else {}),
             **({'HARBORRL_TRAINING_SEED': str(self.sampling_seed)}
                if self.sampling_seed is not None else {}),
+            **({'HARBORRL_NATIVE_RELIABILITY_POLICY': json.dumps(self.reliability_policy)}
+               if self.reliability_policy is not None else {}),
+            **({'HARBORRL_NATIVE_INFRA_BUDGET': json.dumps(self.infra_budget)}
+               if self.infra_budget is not None else {}),
+            **({'HARBORRL_NATIVE_GENERATION_POLICY': json.dumps(self.generation_policy)}
+               if self.generation_policy is not None else {}),
         }
 
 
@@ -688,6 +718,14 @@ class RolloutRuntime:
         if config.sandbox:
             from harborrl.rollout.harbor_job.sandbox_config import SandboxAdmission
             self.sandbox_admission = SandboxAdmission(config.sandbox)
+            try:
+                policy = RetryPolicy(max_attempts_per_slot=config.max_attempts,
+                                     **(config.reliability_policy or {}))
+                budget = InfraBudget(**config.infra_budget) if config.infra_budget else None
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid Sandbox reliability configuration: {exc}") from exc
+            self.reliability = ReliabilityLedger(
+                self.run_root / "sandbox-reliability", policy=policy, budget=budget)
         tokenizer_digest, template_digest = tokenizer_fingerprint(tokenizer)
         if (tokenizer_digest != config.expected_tokenizer_digest
                 or template_digest != config.expected_template_digest):
@@ -698,6 +736,7 @@ class RolloutRuntime:
         self.backend = backend or SGLangBackend(
             config.endpoint, tokenizer, model.adapter,
             tokenizer_digest=tokenizer_digest, template_digest=template_digest,
+            rejected_root=self.run_root / 'rejected-generations',
             max_context=config.max_context,
             audited_raw_logprobs=config.audited_raw_logprobs,
             sampling_seed=config.sampling_seed,
@@ -1156,11 +1195,15 @@ def task_entry(sample):
 
 
 def slot_identity(config, group_index, slot, rollout_id, entry,
-                  reward_digest, sampling_digest, policy_version, *, harness_digest=None):
+                  reward_digest, sampling_digest, policy_version, *, harness_digest=None,
+                  rollout_generation=None):
+    from harborrl.rollout.generations import generation_batch_id, generation_group_id
     return Identity(
         run_id=config.run_id,
-        batch_id=f"rollout-{rollout_id}",
-        group_id=f"group-{group_index}",
+        batch_id=(f'rollout-{rollout_id}' if rollout_generation is None else
+                  generation_batch_id(rollout_id, rollout_generation)),
+        group_id=(f'group-{group_index}' if rollout_generation is None else
+                  generation_group_id(rollout_id, rollout_generation, group_index)),
         slot_id=str(slot),
         attempt_id=secrets.token_hex(16),
         trajectory_id=secrets.token_hex(16),
@@ -1174,15 +1217,45 @@ def slot_identity(config, group_index, slot, rollout_id, entry,
 
 def _group_slots(config, runtime_, group_index, rollout_id, entry,
                  sampling_digest, policy_version, size):
+    from harborrl.rollout.generations import ACTIVE_GENERATION
+    context = ACTIVE_GENERATION.get()
     reward_profile = RewardProfile(**entry["reward_profile"])
     harness_digest = digest(runtime_.profile)
     identities = [
         slot_identity(config, group_index, index, rollout_id, entry,
                       reward_profile.digest, sampling_digest, policy_version,
                       harness_digest=harness_digest)
+        if context is None else slot_identity(
+            config, group_index, index, rollout_id, entry,
+            reward_profile.digest, sampling_digest, policy_version,
+            harness_digest=harness_digest, rollout_generation=context['generation'])
         for index in range(size)
     ]
     return GroupSlots(identities, max_attempts=config.max_attempts), reward_profile
+
+
+def _sandbox_evidence(root):
+    from harborrl.trajectories.native import read_json
+    lifecycle_path = Path(root) / 'runner' / 'sandbox-lifecycle.json'
+    startup_path = Path(root) / 'runner' / 'sandbox-startup-failed.json'
+    lifecycle = read_json(lifecycle_path) if lifecycle_path.is_file() else {}
+    startup = read_json(startup_path) if startup_path.is_file() else {}
+    return lifecycle, startup
+
+
+def _failure_stage(root, *, sandbox, lifecycle=None, startup=None):
+    if not sandbox:
+        return 'execute'
+    if lifecycle is None or startup is None:
+        lifecycle, startup = _sandbox_evidence(root)
+    if lifecycle.get('state') in {'pending', 'waiting', 'creating', 'creation_unknown', 'allocated'}:
+        return 'create' if lifecycle.get('state') != 'allocated' else 'startup'
+    startup_stage = str(startup.get('stage') or '')
+    if startup_stage in {'create', 'readiness'}:
+        return startup_stage
+    if lifecycle.get('state') in {'delete_failed', 'deleting'}:
+        return 'cleanup'
+    return 'execute'
 
 
 async def run_slot(config, runtime_, group_index, slot, rollout_id, entry,
@@ -1225,6 +1298,25 @@ async def _run_slot(config, runtime_, slots, slot, entry, reward_profile):
     cleanup.check()
     for attempt_index in range(slots.max_attempts):
         identity = slots.start(str(slot))
+        from harborrl.rollout.generations import ACTIVE_GENERATION
+        context = ACTIVE_GENERATION.get()
+        if context is not None:
+            from harborrl.rollout.generations import reserve_generation_attempt
+            try:
+                reserve_generation_attempt(runtime_.run_root, identity, context)
+            except RetryableRolloutFailure:
+                slots.finish(str(slot), error='rollout attempt budget exhausted')
+                raise
+        ledger = getattr(runtime_, 'reliability', None)
+        if ledger is not None:
+            try:
+                ledger.reserve(identity.attempt_id, task_digest=identity.task_digest,
+                               policy_version=identity.policy_version, retry_index=attempt_index)
+            except InfraBudgetExhausted as exc:
+                slots.finish(str(slot), error=f"{type(exc).__name__}: {exc}")
+                ledger.event(identity.attempt_id, 'failed', stage='attempt', kind='unknown',
+                             decision='fail-seed', detail={'error': str(exc)})
+                raise
         runner_host = overrides.get(entry["id"])
         if config.runner_transport == 'local':
             runner_host = None
@@ -1244,6 +1336,9 @@ async def _run_slot(config, runtime_, slots, slot, entry, reward_profile):
             admission = runtime_.sandbox_admission.lease(task_binding(config.sandbox, entry['path']), root)
         try:
             async with admission, runtime_.semaphore:
+                if ledger is not None:
+                    ledger.event(identity.attempt_id, 'executing', stage='execute',
+                                 decision='start-attempt')
                 cleanup.check()
                 if auto:
                     # Auto routing leases a gateway once this attempt actually
@@ -1270,18 +1365,68 @@ async def _run_slot(config, runtime_, slots, slot, entry, reward_profile):
                         runtime_.release_shard(shard)
                     cleanup.observe(root)
             cleanup.check()
+            # Validate and settle the slot inside the attempt error boundary.
+            slots.finish(str(slot), ir)
         except CleanupRequiredError as exc:
             slots.finish(str(slot), error=f"{type(exc).__name__}: {exc}")
+            if ledger is not None:
+                ledger.event(identity.attempt_id, 'failed', stage='cleanup',
+                             kind='cleanup-fault', decision='fail-seed')
+                _record_cleanup(ledger, identity, root)
+            raise
+        except asyncio.CancelledError:
+            slots.finish(str(slot), error='attempt cancelled')
+            if ledger is not None:
+                ledger.event(identity.attempt_id, 'failed', stage='cancel', kind='cancel-fault',
+                             decision='cancelled')
+                _record_cleanup(ledger, identity, root)
             raise
         except (OSError, ValueError, RuntimeError, asyncio.TimeoutError) as exc:
             slots.finish(str(slot), error=f"{type(exc).__name__}: {exc}")
+            lifecycle, startup = _sandbox_evidence(root) if config.sandbox else ({}, {})
+            if ledger is not None:
+                try:
+                    kind, _, _ = ledger.observe_failure(
+                        identity.attempt_id,
+                        'protocol' if isinstance(exc, ValueError) else _failure_stage(
+                            root, sandbox=config.sandbox, lifecycle=lifecycle, startup=startup),
+                        exc,
+                        evidence={'cleanup_required': (root / 'cleanup-required.json').exists(),
+                                  'sandbox_state': lifecycle.get('state'),
+                                  'startup_stage': startup.get('stage')},
+                        sandbox_id=lifecycle.get('sandbox_id'),
+                        retry_index=attempt_index)
+                finally:
+                    _record_cleanup(ledger, identity, root)
+            from harborrl.rollout.harbor_job.reconcile import cleanup_debt
+            if config.sandbox and (cleanup_debt(root) or runtime_.sandbox_admission.blocked):
+                raise CleanupUnresolved('sandbox cleanup unresolved; automatic retry blocked') from exc
+            if isinstance(exc, (ValueError, InfraBudgetExhausted, CleanupUnresolved)):
+                raise
             cleanup.check()
-            if config.sandbox and ((root / 'cleanup-required.json').exists() or runtime_.sandbox_admission.blocked):
-                raise RuntimeError('sandbox cleanup unresolved; automatic retry blocked') from exc
+            if ledger is not None and kind == 'task-invalid':
+                raise ValueError('protocol or task lock invalid; infrastructure retry forbidden') from exc
+            if attempt_index + 1 < slots.max_attempts and ledger is not None:
+                await asyncio.sleep(ledger.policy.delay(attempt_index))
             continue
-        slots.finish(str(slot), ir)
+        if ledger is not None:
+            lifecycle, _ = _sandbox_evidence(root) if config.sandbox else ({}, {})
+            ledger.event(identity.attempt_id, 'completed', stage='execute', decision='complete',
+                         sandbox_id=lifecycle.get('sandbox_id'),
+                         detail={'cleanup_state': lifecycle.get('state', 'not_applicable')})
+            _record_cleanup(ledger, identity, root)
         return ir
-    raise RuntimeError(f"native slot {slot} exhausted its retry budget")
+    raise RetryableRolloutFailure(f"native slot {slot} exhausted its retry budget")
+
+
+def _record_cleanup(ledger, identity, root):
+    from harborrl.rollout.harbor_job.reconcile import cleanup_resolved
+    if cleanup_resolved(root):
+        receipt = read_json(Path(root) / 'cleanup-reconciliation.json')
+        ledger.event(identity.attempt_id, 'verified_absent', stage='reconcile',
+                     sandbox_id=receipt.get('sandbox_id'), decision='release-slot',
+                     detail={'receipt_sha256': digest(receipt),
+                             'elapsed_sec': receipt['elapsed_sec'], 'status': receipt['status']})
 
 
 async def cancel_and_wait(tasks, result):
@@ -1313,8 +1458,25 @@ async def run_group(config, runtime_, *, entry, group_index, rollout_id,
     try:
         # Cancel children once here, so gather cannot interrupt slower cleanup.
         return list(await asyncio.shield(result))
-    except BaseException:
+    except BaseException as exc:
         await cancel_and_wait(tasks, result)
+        if isinstance(exc, RetryableRolloutFailure):
+            # A sibling may discover a protocol error or cleanup debt while
+            # settling. Its terminal failure must veto whole-batch recovery.
+            if getattr(getattr(runtime_, 'sandbox_admission', None), 'blocked', False):
+                raise CleanupUnresolved('sibling cleanup unresolved; rollout rerun forbidden') from exc
+            for task in tasks:
+                if not task.cancelled() and task.exception() is not None:
+                    other = task.exception()
+                    if not isinstance(other, RetryableRolloutFailure):
+                        raise other
+        if isinstance(exc, RetryableRolloutFailure):
+            from harborrl.rollout.generations import (
+                ACTIVE_GENERATION,
+                record_failed_group,
+            )
+            if ACTIVE_GENERATION.get() is not None:
+                record_failed_group(runtime_.run_root, next(iter(slots.identities.values())))
         raise
     finally:
         # Settlement (success or failure) is the shrink trigger: every lease

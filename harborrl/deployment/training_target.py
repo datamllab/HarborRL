@@ -204,7 +204,7 @@ def local_target(plan, *, environment):
                "LD_PRELOAD", "CUDA_HOME", "NVTE_CUDA_INCLUDE_DIR",
                "CUDA_VISIBLE_DEVICES", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
                "http_proxy", "https_proxy", "no_proxy", "PYTHONPATH",
-               "SLIME_DIR", "MEGATRON_DIR", "SGLANG_IMAGE"}
+               "SLIME_DIR", "MEGATRON_DIR", "SGLANG_IMAGE", "HARBORRL_HUB_ENV_FILE"}
     child_env = {key: value for key, value in os.environ.items() if key in allowed}
     child_env["PATH"] = os.pathsep.join(
         [str(Path(sys.executable).parent), child_env.get("PATH", os.defpath)])

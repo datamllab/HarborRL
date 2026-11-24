@@ -3,15 +3,7 @@
 </p>
 
 <p align="center">
-  <h1>HarborRL</h1>
-</p>
-
-<p align="center">
-  <a href="https://datamllab.github.io/HarborRL/"><img src="https://img.shields.io/badge/Documentation-526CFE?logo=materialformkdocs&amp;logoColor=white" alt="在线文档"></a>
-</p>
-
-<p align="center">
-  <strong>面向所有人的轻量级智能体强化学习框架</strong>
+  <strong>HarborRL：面向所有人的轻量级智能体强化学习框架</strong>
 </p>
 
 <p align="center">
@@ -19,6 +11,7 @@
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python 3.10+"></a>
   <a href="https://pytorch.org/"><img src="https://img.shields.io/badge/PyTorch-2.4%2B-ee4c2c.svg" alt="PyTorch 2.4+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License"></a>
+  <a href="https://datamllab.github.io/HarborRL/"><img src="https://img.shields.io/badge/Documentation-526CFE?logo=materialformkdocs&amp;logoColor=white" alt="在线文档"></a>
 </p>
 
 <p align="center">

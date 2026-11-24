@@ -7,6 +7,10 @@
 </p>
 
 <p align="center">
+  <a href="https://datamllab.github.io/HarborRL/"><img src="https://img.shields.io/badge/Documentation-526CFE?logo=materialformkdocs&amp;logoColor=white" alt="在线文档"></a>
+</p>
+
+<p align="center">
   <strong>面向所有人的轻量级智能体强化学习框架</strong>
 </p>
 
@@ -25,13 +29,16 @@
 
 ## News
 
+- **2026-11-24** 打通 [Hub 训练闭环](docs/deployment.md#hub-training-with-remote-workers)，支持远程 Docker 与 OpenSandbox worker、轨迹完整性校验，并通过真实 GPU 训练链路验证。
+- **2026-11-24** 完善 [rollout 异常恢复与资源清理](docs/sandbox-rollout.md)，新增 checkpoint 空间检查、保留策略及恢复后续训支持。
+- **2026-11-12** 更新[在线文档](https://datamllab.github.io/HarborRL/)，涵盖安装、配置、训练与部署指南、教程及 API 参考。
 - **2026-11-12** 新增网关弹性扩展：静态路由、弹性自动扩容（多机优先）与自动缩容。
 - **2026-11-12** 新增 Hub 部署模式：适配单向网络集群，节点经 HTTP 拉取任务，无需跨机 SSH。
 - **2026-11-12** 统一接入多种算法，使用数学任务训练验证。
 - **2026-11-12** 优化配置向导、Web 控制台与 Sandbox 执行的审计清理。
 - **2026-10-26** 新增[离线配置向导](docs/configuration-wizard.md)和[本地 Web 控制台](docs/web-console.md)，支持配置、校验、dry-run、训练启动和日志查看。
 - **2026-10-26** 新增 [controller/GPU 部署配置](docs/deployment.md)、可选的 [OpenSandbox 执行能力](docs/sandbox-rollout.md)，以及按需启用的[训练与推理一致性检查](docs/train-inference-consistency.md)。
-- **10/2026** 📣📣📣 HarborRL released
+- **2026-10-12** 📣📣📣 HarborRL released
 
 ## 项目介绍
 

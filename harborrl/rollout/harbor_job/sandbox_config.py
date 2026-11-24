@@ -136,15 +136,65 @@ class SandboxAdmission:
         self.total = asyncio.Semaphore(cfg['max_live_instances'])
         self.bindings = {b['image']: asyncio.Semaphore(b['max_live_instances']) for b in cfg['bindings']}
         self.blocked = False
+        self.debts = {}
+        self._blocked = asyncio.Event()
+
+    async def _acquire(self, semaphore):
+        from .reliability import CleanupUnresolved
+
+        acquired = asyncio.create_task(semaphore.acquire())
+        blocked = asyncio.create_task(self._blocked.wait())
+        handed_off = False
+        try:
+            await asyncio.wait((acquired, blocked), return_when=asyncio.FIRST_COMPLETED)
+            if self.blocked:
+                raise CleanupUnresolved('sandbox admission blocked by unresolved cleanup')
+            await acquired
+            handed_off = True
+        finally:
+            for task in (acquired, blocked):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(acquired, blocked, return_exceptions=True)
+            if not handed_off and not acquired.cancelled() and acquired.exception() is None:
+                semaphore.release()
 
     @asynccontextmanager
     async def lease(self, binding, root):
         # Wait for image-specific capacity before reserving a global live slot.
-        async with self.bindings[binding['image']], self.total:
+        from .reconcile import cleanup_debt
+        image = self.bindings[binding['image']]
+        if self.blocked:
+            raise RuntimeError('sandbox admission blocked by unresolved cleanup')
+        await self._acquire(image)
+        acquired_total = False
+        retained = False
+        try:
+            await self._acquire(self.total)
+            acquired_total = True
             if self.blocked:
                 raise RuntimeError('sandbox admission blocked by unresolved cleanup')
             try:
                 yield
             finally:
-                if (Path(root) / 'cleanup-required.json').exists():
+                if cleanup_debt(root):
                     self.blocked = True
+                    self._blocked.set()
+                    retained = True
+                    self.debts[str(Path(root).resolve())] = image
+        finally:
+            if not retained:
+                if acquired_total:
+                    self.total.release()
+                image.release()
+
+    def reconcile(self, root):
+        from .reconcile import cleanup_resolved
+        key = str(Path(root).resolve())
+        if key not in self.debts or not cleanup_resolved(root):
+            raise RuntimeError('cleanup debt does not have a verified receipt')
+        self.debts.pop(key).release()
+        self.total.release()
+        self.blocked = bool(self.debts)
+        if not self.blocked:
+            self._blocked.clear()

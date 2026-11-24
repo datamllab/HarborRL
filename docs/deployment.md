@@ -131,6 +131,37 @@ even when service shutdown fails. Both Docker and Sandbox runtimes reject new
 attempts while observed cleanup-required markers remain. Inspect the resources
 before removing resolved markers.
 
+## Hub training with remote workers
+
+Use `manager.mode: hub` with an explicit `hub_port`, reachable `hub_url`
+and GPU pool, and select `rollout.provider: hub_pull`. The trainer submits
+groups to the Hub; workers execute attempts and publish trajectory IRs.
+The trainer validates their digests, batch identities, readiness and policy
+versions before consuming them. Workers use Docker by default; a sandbox
+configuration selects OpenSandbox with the same trajectory contract. See
+[sandbox rollout](sandbox-rollout.md) for environment and cleanup settings.
+
+Set `HARBORRL_HUB_URL` and `HARBORRL_HUB_TOKEN_FILE` for the training process.
+For Ray deployments, `HARBORRL_HUB_ENV_FILE` can name a shared JSON object
+mapping these variable names and `RUN_ID` to values; explicit environment
+variables take precedence. Protect the token file and keep credentials out
+of checked-in configuration.
+
+Every worker must export `HARBORRL_HUB_ATTEMPT_MIRROR` as an absolute shared
+directory, for example `/shared/harborrl/attempts`. The trainer must see the
+same directory at the same path. Missing or relative paths fail before an
+attempt starts. Attempts execute on worker-local storage and publish their
+IR and evaluation records into this shared directory. If task roots differ
+between trainer and worker, configure `HARBORRL_HUB_TASK_PATH_MAP` as
+`shared_path=worker_path` pairs separated by commas. The worker gateway
+address must be reachable from inside its Docker or OpenSandbox environment.
+
+Validate consecutive training steps, checkpoint publication and a separate
+restore followed by another training step. Successful transport, zero-reward
+steps and checkpoint restoration establish execution correctness; they do
+not establish learning improvement. Checkpoint space guards and retention
+settings help bound storage use but do not replace capacity planning.
+
 ## Operational limits
 
 Service mode requires shared storage visible at the configured paths on the

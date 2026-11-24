@@ -5,9 +5,10 @@ updated through the caller's drained pool barrier. Before/after probes alone
 are deliberately insufficient. This adapter does not load models on import.
 """
 import json
+from pathlib import Path
 from urllib import request
 
-from harborrl.trajectories.native import digest, finite
+from harborrl.trajectories.native import digest, finite, publish
 
 from .messages import ProtocolError
 
@@ -15,7 +16,7 @@ from .messages import ProtocolError
 class SGLangBackend:
     def __init__(self, endpoint, tokenizer, model_adapter, *, tokenizer_digest,
                  template_digest, timeout=120, max_context=32768,
-                 audited_raw_logprobs=False, sampling_seed=None):
+                 audited_raw_logprobs=False, sampling_seed=None, rejected_root=None):
         if sampling_seed is not None and (type(sampling_seed) is not int or not 0 <= sampling_seed < 2**31):
             raise ValueError('sampling_seed must be null or an integer in 0..2147483647')
         self.endpoint = endpoint.rstrip("/")
@@ -25,6 +26,7 @@ class SGLangBackend:
         self.timeout, self.max_context = timeout, max_context
         self.audited_raw_logprobs = audited_raw_logprobs
         self.sampling_seed = sampling_seed
+        self.rejected_root = Path(rejected_root) if rejected_root is not None else None
         self.opener = request.build_opener(request.ProxyHandler({}))
 
     def prepare(self, converted):
@@ -81,7 +83,23 @@ class SGLangBackend:
                               headers={"Content-Type": "application/json"})
         with self.opener.open(req, timeout=self.timeout) as response:
             output = json.load(response)
-        return self.decode(output, payload, converted, identity, response_id)
+        try:
+            return self.decode(output, payload, converted, identity, response_id)
+        except (ValueError, TypeError, KeyError) as exc:
+            if self.rejected_root is not None:
+                # Keep rejected generations outside the trainable trace. Never
+                # replay them automatically or include HTTP credentials here.
+                evidence = {"identity": identity.to_dict(), "response_id": response_id,
+                    "error_type": type(exc).__name__, "training_use": False,
+                    "serving_input": payload, "converted_request": converted,
+                    "serving_output": output, "serving_output_digest": digest(output)}
+                path = self.rejected_root / digest(identity.to_dict()) / (digest(response_id) + '.json')
+                try:
+                    publish(path, evidence)
+                except (OSError, ValueError, TypeError) as storage_error:
+                    # A failed diagnostic write is not a backend transport fault.
+                    raise ValueError('rejected generation evidence could not be persisted') from storage_error
+            raise
 
     def decode(self, output, payload, converted, identity, response_id):
         meta = output.get("meta_info", {})

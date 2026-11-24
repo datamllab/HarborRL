@@ -8,7 +8,8 @@ from harborrl.trajectories.native import digest, publish
 
 NUMBER = r"[+-]?(?:\d{1,32}(?:\.\d{1,16})?|\d{1,32}/[1-9]\d{0,31})"
 GSM_NUMBER = r"[+-]?(?:\d{1,3}(?:,\d{3}){1,10}(?:\.\d{1,16})?|\d{1,32}(?:\.\d{1,16})?|\d{1,32}/[1-9]\d{0,31})"
-VERIFIERS = {"exact_rational_v1", "gsm8k_numeric_v1"}
+VERIFIERS = {"exact_rational_v1", "gsm8k_numeric_v1", "math_latex_v1"}
+LATEX_REFERENCE = re.compile(r"\S.{0,199}")  # 单行、非空、≤200 字符；结构合法性由 math_verify 解析兜底
 TASK_FIELDS = {"task_id", "problem_id", "prompt", "reference", "verifier", "split", "source", "license"}
 
 
@@ -25,8 +26,13 @@ def load_tasks(path):
             raise ValueError("Task fields must be nonempty strings")
         if row["split"] not in {"train", "validation", "test"} or row["verifier"] not in VERIFIERS:
             raise ValueError("Only split-locked tasks with a supported numeric verifier are supported")
-        if len(row["prompt"]) > 8192 or not re.fullmatch(NUMBER, row["reference"]):
-            raise ValueError("Unsupported prompt length or rational reference")
+        if len(row["prompt"]) > 8192:
+            raise ValueError("Unsupported prompt length")
+        if row["verifier"] == "math_latex_v1":
+            if not LATEX_REFERENCE.fullmatch(row["reference"]):
+                raise ValueError("math_latex_v1 reference must be a bounded single-line LaTeX answer")
+        elif not re.fullmatch(NUMBER, row["reference"]):
+            raise ValueError("Unsupported rational reference")
         if row["task_id"] in identities:
             raise ValueError("Duplicate task_id")
         identities.add(row["task_id"])
@@ -42,7 +48,7 @@ def load_tasks(path):
 
 def _gsm_answer(response):
     candidates = []
-    for pattern in (r"(?m)^[ \t]*####[ \t]+([^\n]{1,100})$", r"\\boxed\{([^{}]{1,100})\}"):
+    for pattern in (r"(?m)^[ \t]*####[ \t]*([^\n]{1,100})$", r"\\boxed\{([^{}]{1,100})\}"):
         for match in re.finditer(pattern, response):
             text = match[1].strip()
             for wrapper in ("**", "$"):
@@ -56,9 +62,38 @@ def _gsm_answer(response):
     return text if re.fullmatch(NUMBER, text) else ""
 
 
+def _latex_verify(response, reference):
+    try:
+        from math_verify import parse as mv_parse, verify as mv_verify
+    except ImportError as exc:
+        raise ValueError("math_latex_v1 requires the math_verify package") from exc
+    record = {"verifier": "math_latex_v1", "input_digest": digest({"response": response, "reference": reference}),
+              "status": "unparseable", "reward": 0.0, "parsed": None}
+    if not isinstance(response, str) or len(response) > 16384:
+        record["status"] = "unsupported"
+        return record
+    try:
+        gold = mv_parse("$" + reference.strip() + "$")
+        answer = mv_parse(response)
+    except Exception:
+        return record
+    if not gold or not answer:
+        return record
+    try:
+        correct = bool(mv_verify(gold, answer))
+    except Exception:
+        return record
+    extracted = answer[0] if isinstance(answer, list) and answer else str(answer)
+    record.update(status="correct" if correct else "incorrect", reward=1.0 if correct else 0.0,
+                  parsed=str(extracted)[:100])
+    return record
+
+
 def verify(response, reference, verifier="exact_rational_v1"):
     if verifier not in VERIFIERS:
         raise ValueError(f"Unsupported numeric verifier: {verifier}")
+    if verifier == "math_latex_v1":
+        return _latex_verify(response, reference)
     record = {"verifier": verifier, "input_digest": digest({"response": response, "reference": reference}),
               "status": "unparseable", "reward": 0.0, "parsed": None}
     if not isinstance(response, str) or len(response) > 16384:

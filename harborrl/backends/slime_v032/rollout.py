@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import math
 import os
+import time
 from pathlib import Path
 
 from harborrl.backends.slime_v032.versions import lock_policy_version
@@ -20,6 +21,7 @@ from harborrl.rollout.runtime import (
     close_runtime,
     current_policy_version,
     digest,
+    run_embedded,
     run_group,
     runtime,
     task_entry,
@@ -102,7 +104,15 @@ async def generate_group(args, group, sampling_params_, rollout_id, evaluation=F
     }))
     config = runtime_config_from_args(args)
     runtime_ = await runtime(config, tokenizer_loader=slime_tokenizer_loader(args))
-    policy_version = current_policy_version(runtime_)
+    from harborrl.rollout.generations import ACTIVE_GENERATION
+    context = ACTIVE_GENERATION.get()
+    if context is None:
+        policy_version = current_policy_version(runtime_)
+    else:
+        from harborrl.platform.policy_pool import validate_pool
+        policy_version = validate_pool(runtime_.backend.pool_states())
+        if policy_version != context['policy_version']:
+            raise ValueError('serving pool changed during rollout generation recovery')
     trajectories = await run_group(
         config, runtime_, entry=entry, group_index=group_index_of(group),
         rollout_id=rollout_id, sampling_digest=sampling_digest,
@@ -127,13 +137,11 @@ def bind_group_samples(group, trajectories):
     return output
 
 
-async def run_service_groups(args, groups, rollout_id):
-    """Request complete groups from the manager-side RolloutService (P3)."""
+async def prepare_service_policy(args):
+    """Activate and lock the pool before reserving a rollout generation."""
     from harborrl.backends.slime_v032.rollout_service_client import (
         RolloutServiceClient,
         fetch_pool_states,
-        load_group_result,
-        service_group_request,
     )
 
     token_file = os.environ.get('HARBORRL_ROLLOUT_SERVICE_TOKEN_FILE')
@@ -155,6 +163,22 @@ async def run_service_groups(args, groups, rollout_id):
     # The manager's activation publishes the locked policy-pool record into
     # the shared run directory; lock the same version before requesting.
     policy_version = lock_policy_version(args)
+    return client, policy_version
+
+
+async def run_service_groups(args, groups, rollout_id):
+    """Request complete groups from the manager-side RolloutService (P3)."""
+    from harborrl.backends.slime_v032.rollout_service_client import (
+        load_group_result,
+        service_group_request,
+    )
+    from harborrl.rollout.generations import ACTIVE_GENERATION
+    from harborrl.rollout.harbor_job.reliability import RetryableRolloutFailure
+
+    client, policy_version = await prepare_service_policy(args)
+    context = ACTIVE_GENERATION.get()
+    if context is not None and context['policy_version'] != policy_version:
+        raise ValueError('serving pool changed during rollout generation recovery')
     params = sampling_params(args)
     async def request_group(group):
         request = service_group_request(group, params, rollout_id, policy_version)
@@ -163,6 +187,9 @@ async def run_service_groups(args, groups, rollout_id):
         # GroupResult itself.
         result = payload.get("result") if isinstance(payload, dict) else None
         if not isinstance(result, dict):
+            if (isinstance(payload, dict) and payload.get('status') == 'failed'
+                    and payload.get('failure_code') == 'retryable_infrastructure'):
+                raise RetryableRolloutFailure('service group exhausted infrastructure attempts')
             from harborrl.backends.slime_v032.rollout_service_client import (
                 ServiceRolloutError,
             )
@@ -177,10 +204,13 @@ async def run_service_groups(args, groups, rollout_id):
     try:
         results = await asyncio.gather(*pending, return_exceptions=True)
         # Retain independent groups' evidence, but never export a partial batch.
-        for result in results:
-            if isinstance(result, BaseException):
-                raise result
+        errors = [result for result in results if isinstance(result, BaseException)]
+        if errors:
+            raise next((exc for exc in errors if not isinstance(exc, RetryableRolloutFailure)), errors[0])
         return results
+    except RetryableRolloutFailure:
+        # Every group settled before retry; new generations use fresh keys.
+        raise
     except BaseException:
         # HTTP workers keep running until the manager acknowledges cancellation.
         try:
@@ -190,11 +220,141 @@ async def run_service_groups(args, groups, rollout_id):
         raise
 
 
+
+
+def hub_rollout_enabled():
+    """True when hub dispatch is configured via env or the shared JSON file.
+
+    Ray workers inherit the raylet's startup environment on platform-boot
+    strapped clusters, so the shared file is the reliable carrier."""
+    import json as _json
+    if os.environ.get("HARBORRL_HUB_URL"):
+        return True
+    env_file = os.environ.get(
+        "HARBORRL_HUB_ENV_FILE",
+        "")
+    if env_file:
+        try:
+            return bool(_json.loads(Path(env_file).read_text(encoding="utf-8")).get("HARBORRL_HUB_URL"))
+        except (OSError, ValueError):
+            return False
+    return False
+
+async def run_hub_groups(args, groups, rollout_id):
+    """Dispatch every (group, slot) to the hub; workers execute full trials."""
+    from harborrl.backends.slime_v032.hub_rollout_client import (
+        HubRolloutError, client_from_environment, hub_attempt_request,
+        load_attempt_ir,
+    )
+    from harborrl.backends.slime_v032.rollout_service_client import (
+        fetch_pool_states, service_group_request,
+    )
+
+    client = client_from_environment()
+    import json as _json
+    _extra = {}
+    _env_file = os.environ.get(
+        "HARBORRL_HUB_ENV_FILE",
+        "")
+    try:
+        _extra = _json.loads(Path(_env_file).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        _extra = {}
+
+    def _hub_setting(name, default=None):
+        return os.environ.get(name) or _extra.get(name) or default
+
+    serving_endpoint = _hub_setting("HARBORRL_HUB_SERVING_ENDPOINT")
+    hf_ckpt = _hub_setting("HARBORRL_HUB_HF_CKPT")
+    if not serving_endpoint or not hf_ckpt:
+        raise HubRolloutError(
+            "hub rollout requires HARBORRL_HUB_SERVING_ENDPOINT and HARBORRL_HUB_HF_CKPT")
+    tokenizer_digest = _hub_setting("HARBORRL_HUB_TOKENIZER_DIGEST", "")
+    template_digest = _hub_setting("HARBORRL_HUB_TEMPLATE_DIGEST", "")
+    model_tag = _hub_setting("HARBORRL_HUB_MODEL_TAG", "qwen3-8B")
+    max_output_tokens = int(_hub_setting("HARBORRL_HUB_MAX_OUTPUT_TOKENS", "8192"))
+    max_context = int(_hub_setting("HARBORRL_HUB_MAX_CONTEXT", "32768"))
+    sandbox = _json.loads(_hub_setting("HARBORRL_NATIVE_SANDBOX", "null"))
+    if sandbox is not None and not isinstance(sandbox, dict):
+        raise HubRolloutError("HARBORRL_NATIVE_SANDBOX must be an object or null")
+    audited_raw_logprobs = _hub_setting("HARBORRL_NATIVE_AUDITED_LOGPROBS", "0") == "1"
+    deadline = time.monotonic() + float(
+        _hub_setting("HARBORRL_HUB_ROLLOUT_TIMEOUT_S", "3600"))
+    # Service mode has the manager announce/activate the serving pool and
+    # publish the locked record; hub mode inlines it: read what the local
+    # rollout engine actually serves and lock that version into the run dir.
+    run_dir = os.environ.get("RUN_DIR")
+    if not run_dir:
+        raise HubRolloutError("hub rollout requires RUN_DIR")
+    # The trainer updates serving weights between rollouts. Re-admit the pool
+    # each time; reusing the first file would dispatch every later batch stale.
+    from harborrl.platform.policy_pool import publish_pool
+    router = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
+    states = await asyncio.to_thread(fetch_pool_states, router)
+    await asyncio.to_thread(publish_pool, states)
+    policy_version = lock_policy_version(args)
+
+    params = sampling_params(args)
+    submitted = []  # (group, slot_id, task_id, request)
+    for group in groups:
+        base = service_group_request(group, params, rollout_id, policy_version)
+        for slot in base["slots"]:
+            request_ = hub_attempt_request(
+                base, slot, serving_endpoint=serving_endpoint, hf_ckpt=hf_ckpt,
+                tokenizer_digest=tokenizer_digest, template_digest=template_digest,
+                model_tag=model_tag, max_output_tokens=max_output_tokens,
+                max_context=max_context, task_path=base["task"]["path"],
+                audited_raw_logprobs=audited_raw_logprobs)
+            if sandbox is not None:
+                request_["sandbox"] = sandbox
+            task_id = await asyncio.to_thread(client.submit_attempt, request_)
+            submitted.append((group, slot["slot_id"], task_id, request_))
+
+    pending_ids = {task_id for _, _, task_id, _ in submitted}
+    completed = {}
+    while pending_ids:
+        if time.monotonic() > deadline:
+            raise HubRolloutError(
+                f"hub rollout deadline reached with {len(pending_ids)} tasks pending")
+        response = await asyncio.to_thread(client.task_status, list(pending_ids))
+        statuses = response.get("tasks", {})
+        for task_id, state in statuses.items():
+            status = state.get("status")
+            if status == "completed":
+                completed[task_id] = state.get("result")
+                pending_ids.discard(task_id)
+            elif status in ("failed", "unknown"):
+                raise HubRolloutError(
+                    f"hub task {task_id} {status}: {state.get('error', '')}")
+        if pending_ids:
+            await asyncio.sleep(client.poll_interval)
+
+    ir_groups = []
+    for group in groups:
+        group_tasks = [(slot_id, task_id, request_)
+                       for g, slot_id, task_id, request_ in submitted if g is group]
+        group_tasks.sort(key=lambda item: int(item[0]))
+        trajectories = []
+        for slot_id, task_id, request_ in group_tasks:
+            ir = load_attempt_ir(
+                task_id, completed[task_id],
+                expected_policy_version=policy_version,
+                expected_task_digest=request_.get("task_digest") or None)
+            trajectories.append(ir)
+        bind_group_samples(group, trajectories)
+        ir_groups.append(trajectories)
+    return ir_groups
+
+
 async def run_native_groups(args, groups, policy_version, rollout_id):
     """Run every group concurrently and return only complete IR evidence."""
     params = sampling_params(args)
     if os.environ.get("HARBORRL_ROLLOUT_SERVICE_URL"):
         ir_groups = await run_service_groups(args, groups, rollout_id)
+        assert_locked_policy_versions(ir_groups, policy_version)
+        return ir_groups
+    if hub_rollout_enabled():
+        ir_groups = await run_hub_groups(args, groups, rollout_id)
         assert_locked_policy_versions(ir_groups, policy_version)
         return ir_groups
     pending = [asyncio.create_task(
@@ -203,15 +363,30 @@ async def run_native_groups(args, groups, policy_version, rollout_id):
     try:
         # Keep parent cancellation from being forwarded twice during cleanup.
         results = await asyncio.shield(batch)
-    except BaseException:
+    except BaseException as exc:
         # Groups own their slot cleanup; finish it before shutting down the gateway.
         await cancel_and_wait(pending, batch)
-        # Close the cached runtime here unless an embedded run owns the loop:
-        # run_embedded's failure handler closes it after the loop unwinds, so
-        # the original error is what propagates.
-        from harborrl.rollout import runtime as _runtime
-        loop = getattr(_runtime, "_EMBEDDED_LOOP", None)
-        if not (loop is not None and loop.is_running()):
+        from harborrl.rollout import runtime as runtime_module
+        from harborrl.rollout.generations import ACTIVE_GENERATION
+        from harborrl.rollout.harbor_job.reliability import (
+            CleanupUnresolved,
+            RetryableRolloutFailure,
+        )
+        current = runtime_module._RUNTIME
+        if (isinstance(exc, RetryableRolloutFailure) and current is not None
+                and getattr(getattr(current, 'sandbox_admission', None), 'blocked', False)):
+            close_runtime()
+            raise CleanupUnresolved('sibling cleanup unresolved; rollout rerun forbidden') from exc
+        if isinstance(exc, RetryableRolloutFailure):
+            for task in pending:
+                if not task.cancelled() and task.done() and task.exception() is not None:
+                    other = task.exception()
+                    if not isinstance(other, RetryableRolloutFailure):
+                        close_runtime()
+                        raise other
+        loop = getattr(runtime_module, "_EMBEDDED_LOOP", None)
+        if (not (loop is not None and loop.is_running())
+                and (not isinstance(exc, RetryableRolloutFailure) or ACTIVE_GENERATION.get() is None)):
             close_runtime()
         raise
     ir_groups = []
@@ -321,7 +496,47 @@ def generate_rollout(
     if runner is None:
         async def runner(args_, groups_, policy_version):
             return await run_native_groups(args_, groups_, policy_version, rollout_id)
-    ir_groups = asyncio.run(runner(args, groups, None))
+        if os.environ.get('HARBORRL_NATIVE_SANDBOX', 'null') != 'null':
+            native_runner = runner
+
+            async def runner(args_, groups_, policy_version):
+                import json
+
+                from harborrl.rollout.generations import (
+                    GenerationJournal,
+                    GenerationPolicy,
+                )
+
+                if os.environ.get('HARBORRL_ROLLOUT_SERVICE_URL'):
+                    _, version = await prepare_service_policy(args_)
+                else:
+                    config = runtime_config_from_args(args_)
+                    runtime_ = await runtime(config, tokenizer_loader=slime_tokenizer_loader(args_))
+                    version = current_policy_version(runtime_)
+                policy = GenerationPolicy(**json.loads(
+                    os.environ.get('HARBORRL_NATIVE_GENERATION_POLICY', '{}')))
+                journal = GenerationJournal(os.environ['RUN_DIR'], policy)
+                inputs = {'sampling': sampling_params(args_), 'groups': [
+                    {'group_index': group_index_of(group), 'tasks': [task_entry(sample) for sample in group],
+                     'slots': [str(index) for index in range(len(group))]} for group in groups_]}
+
+                def discard():
+                    for group in groups_:
+                        for sample in group:
+                            sample.metadata.pop('native_ir', None)
+                            sample.reward = None
+                            sample.response = None
+
+                async def run(generation):
+                    return await native_runner(args_, groups_, version)
+
+                def validate(irs):
+                    export_training_batch(irs, group_size=expected_size,
+                                          rollout_id_base=rollout_id * batch_size)
+
+                return await journal.execute(rollout_id, inputs, version, run,
+                                             discard=discard, validate=validate)
+    ir_groups = run_embedded(runner(args, groups, None))
     policy_version = lock_policy_version(args)
     assert_locked_policy_versions(ir_groups, policy_version)
     batch = export_training_batch(

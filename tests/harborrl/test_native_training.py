@@ -124,6 +124,41 @@ def test_schema2_launch_plan_and_strict_override(tmp_path, capsys):
 
 
 
+def test_native_checkpoint_and_token_settings_reach_child(tmp_path, monkeypatch):
+    path, task = native_config(tmp_path)
+    from harborrl.data.harbor.native_inspector import inspect_native
+    from harborrl.deployment.training_target import local_target
+    from harborrl.platform.evidence import run_environment
+
+    config = load_config(path, ['training.resume=checkpoints/prior',
+                                'training.max_tokens_per_gpu=32768', 'training.max_ckpt_keep=1'])
+    catalog_path = Path(config['tasks']['catalog'])
+    entries = json.loads(catalog_path.read_text())
+    entries[0]['task_digest'] = inspect_native(task)['task_digest']
+    catalog_path.write_text(json.dumps(entries))
+    plan = launch_plan(config)
+    # Ambient launcher variables are deliberately filtered; declared config wins.
+    monkeypatch.setenv('RESUME_LOAD', '/wrong-checkpoint')
+    monkeypatch.setenv('MAX_TOKENS_PER_GPU', '8')
+    monkeypatch.setenv('MAX_CKPT_KEEP', '99')
+    environment = run_environment(plan, tmp_path, catalog_path, tmp_path / 'prompts.jsonl')
+    child = local_target(plan, environment=environment)
+    assert child.env['RESUME_LOAD'] == str(tmp_path / 'checkpoints/prior')
+    assert child.env['MAX_TOKENS_PER_GPU'] == '32768'
+    assert child.env['MAX_CKPT_KEEP'] == '1'
+    defaults = launch_plan(load_config(path))['environment']
+    assert 'RESUME_LOAD' not in defaults
+    assert defaults['MAX_TOKENS_PER_GPU'] == '16384'
+    assert defaults['MAX_CKPT_KEEP'] == '2'
+    for key in ('max_tokens_per_gpu', 'max_ckpt_keep'):
+        for value in ('0', '-1', 'true', '1.5', 'null'):
+            with pytest.raises(ValueError, match=f'training.{key}'):
+                load_config(path, [f'training.{key}={value}'])
+    for value in ('true', '1', '""', '"   "'):
+        with pytest.raises(ValueError, match='training.resume'):
+            load_config(path, [f'training.resume={value}'])
+
+
 def test_cli_command_mode_selects_experiment_dimensions(tmp_path, capsys, monkeypatch):
     path, task = native_config(tmp_path)
     from harborrl.data.harbor.native_inspector import inspect_native
@@ -485,6 +520,7 @@ def test_native_batch_waits_for_all_group_cleanup(
     from harborrl.rollout import runtime as rollout_runtime
 
     monkeypatch.delenv('HARBORRL_ROLLOUT_SERVICE_URL', raising=False)
+    monkeypatch.setattr(rollout, 'hub_rollout_enabled', lambda: False)
     cleaned, closed = [], []
     failure = RuntimeError('one group failed')
 

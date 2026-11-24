@@ -40,6 +40,9 @@ TRAINING_FIELDS = {
     "training.learning_rate": ("number", "Positive finite learning rate"),
     "training.seed": ("number_or_null", "Sampling seed shared by every group; null keeps sampling nondeterministic"),
     "training.export_hf": ("boolean", "Also export an HF checkpoint next to the training checkpoints"),
+    "training.resume": ("path_or_null", "Checkpoint directory to resume; rollout count remains the total target"),
+    "training.max_tokens_per_gpu": ("integer", "Maximum actor token budget per GPU"),
+    "training.max_ckpt_keep": ("integer", "Complete checkpoints retained after a new checkpoint is saved"),
     "training.save_interval": ("integer", "Positive checkpoint interval in rollout batches"),
     "training.backend_contract": ("string", "Pinned backend/algorithm contract"),
     "sampling.group_size": ("integer", "Samples per prompt, at least two for GRPO"),
@@ -138,7 +141,7 @@ def build_catalog():
         for name in sorted(fields):
             kind, description = DEPLOYMENT_FIELDS[name]
             deployment[f"{section}.{name}"] = {"type": kind, "description": description}
-    for key, values in {"manager.mode": ("embedded", "service"), "storage.mode": schema.STORAGE_MODES,
+    for key, values in {"manager.mode": ("embedded", "service", "hub"), "storage.mode": schema.STORAGE_MODES,
                         "rollout.provider": schema.ROLLOUT_PROVIDERS, "gpu_target.transport": schema.TRANSPORTS}.items():
         deployment[key]["values"] = list(values)
     datasets = deepcopy(dataset_metadata()["datasets"])

@@ -29,6 +29,8 @@ def load_config(config, path, overrides=None, task_ids=None):
     config['training'].setdefault('resume', None)
     config['training'].setdefault('export_hf', False)
     config['training'].setdefault('seed', None)
+    config['training'].setdefault('max_tokens_per_gpu', 16384)
+    config['training'].setdefault('max_ckpt_keep', 2)
     config.setdefault('algorithm', {'name': 'grpo'})
     fields = {**MATH_FIELDS, 'training': MATH_FIELDS['training'] | {'resume', 'export_hf', 'seed'},
               'algorithm': {'name'}}
@@ -90,7 +92,7 @@ def load_config(config, path, overrides=None, task_ids=None):
         config[section][field] = str((Path(path).parent / Path(value).expanduser()).resolve())
     for section, keys in [('sampling', FIELDS['sampling']),
                           ('deployment', FIELDS['deployment'] - {'layout'}),
-                          ('training', {'num_rollout', 'save_interval'})]:
+                          ('training', {'num_rollout', 'save_interval', 'max_tokens_per_gpu', 'max_ckpt_keep'})]:
         for key in keys:
             if type(config[section][key]) is not int or config[section][key] <= 0:
                 raise ValueError(f'{section}.{key} must be a positive integer')
@@ -114,7 +116,7 @@ def load_config(config, path, overrides=None, task_ids=None):
     if (deployment['actor_gpus'] % deployment['actor_tensor_parallel_size']
             or deployment['rollout_gpus'] % deployment['rollout_gpus_per_engine']):
         raise ValueError('GPU counts must be divisible by tensor parallel sizes')
-    if not isinstance(config['model']['args_file'], str) or not re.fullmatch(r'[A-Za-z0-9_-]+', config['model']['args_file']):
+    if not isinstance(config['model']['args_file'], str) or not re.fullmatch(r'[A-Za-z0-9._-]+', config['model']['args_file']):
         raise ValueError('model.args_file must name a Slime model preset')
     if config['consistency']['mode'] != 'off':
         raise ValueError('text_math currently requires consistency.mode: off; Harbor sidecars are not math evidence')

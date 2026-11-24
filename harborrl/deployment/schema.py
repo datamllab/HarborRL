@@ -27,7 +27,9 @@ LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "[::1]"}
 MANAGER_REQUIRED = {"id", "mode", "bind", "control_port", "control_url", "gateway_port",
                     "gateway_url", "run_token_file", "source_dir", "controller_python"}
 MANAGER_OPTIONAL = {"gateway_shards", "gateway_routing", "sandboxes_per_shard",
-                    "worker_shards", "gateway_hosts", "shard_python"}
+                    "worker_shards", "gateway_hosts", "shard_python",
+                    "hub_port", "hub_url", "hub_pull_interval",
+                    "gpu_pool", "max_concurrent_runs", "run_queue_size"}
 MANAGER_FIELDS = MANAGER_REQUIRED | MANAGER_OPTIONAL
 SHARD_FIELDS = {"name", "port", "mode", "url", "admin_url"}
 SHARD_MODES = ("local", "remote")
@@ -46,8 +48,8 @@ WORKER_FIELDS = {"id", "ssh", "source_dir", "runner_python", "docker", "task_roo
 ROLLOUT_FIELDS = {"provider", "workers"}
 CONNECTIVITY_FIELDS = {"command_timeout_s", "ssh_timeout_s", "http_timeout_s",
                        "gpu_to_controller", "worker_to_gateway", "manager_to_gpu_inference"}
-TRANSPORTS = ("local", "ssh")
-ROLLOUT_PROVIDERS = ("ssh_docker", "embedded", "sandbox")
+TRANSPORTS = ("local", "ssh", "http_pull")
+ROLLOUT_PROVIDERS = ("ssh_docker", "embedded", "sandbox", "hub_pull")
 STORAGE_MODES = ("shared_fs",)
 
 
@@ -220,8 +222,8 @@ def _manager(config):
     if missing:
         raise DeploymentError(f"manager requires {sorted(missing)}")
     mode = config["mode"]
-    if mode not in ("embedded", "service"):
-        raise DeploymentError("manager.mode must be embedded or service")
+    if mode not in ("embedded", "service", "hub"):
+        raise DeploymentError("manager.mode must be embedded, service, or hub")
     service = mode == "service"
     control_port = _positive_int(config["control_port"], "manager.control_port")
     gateway_port = _positive_int(config["gateway_port"], "manager.gateway_port")
@@ -291,6 +293,89 @@ def _manager(config):
                 "manager.shard_python interprets gateway_hosts growth; "
                 "declare the pool first")
         shard_python = _absolute_path(shard_python, "manager.shard_python")
+    # Hub mode specific validation and fields
+    if mode == "hub":
+        hub_port = config.get("hub_port")
+        if hub_port is None:
+            raise DeploymentError("manager.hub_port is required in hub mode")
+        hub_port = _positive_int(hub_port, "manager.hub_port")
+        if hub_port == control_port or hub_port == gateway_port:
+            raise DeploymentError("manager.hub_port must differ from control_port and gateway_port")
+        if not 0 < hub_port < 65536:
+            raise DeploymentError("manager.hub_port must be in 1..65535")
+
+        hub_url = config.get("hub_url")
+        if hub_url is None:
+            raise DeploymentError("manager.hub_url is required in hub mode")
+        hub_url = _plain_origin(hub_url, "manager.hub_url", port=hub_port, allow_loopback=False)
+
+        gpu_pool = config.get("gpu_pool")
+        if gpu_pool is None or not isinstance(gpu_pool, list) or not gpu_pool:
+            raise DeploymentError("manager.gpu_pool must be a nonempty list in hub mode")
+
+        # Validate each GPU in the pool
+        validated_pool = []
+        pool_ids = set()
+        for gpu in gpu_pool:
+            if not isinstance(gpu, dict):
+                raise DeploymentError("manager.gpu_pool entries must be mappings")
+            gpu_id = _slug(gpu.get("id", ""), "gpu_pool entry id")
+            if gpu_id in pool_ids:
+                raise DeploymentError(f"duplicate gpu_pool id: {gpu_id}")
+            pool_ids.add(gpu_id)
+
+            transport = gpu.get("transport", "ssh")
+            if transport not in ("ssh", "http_pull"):
+                raise DeploymentError("gpu_pool transport must be ssh or http_pull")
+
+            validated_gpu = {
+                "id": gpu_id,
+                "transport": transport,
+                "source_dir": _absolute_path(gpu["source_dir"], f"gpu_pool {gpu_id} source_dir"),
+                "train_python": _absolute_path(gpu["train_python"], f"gpu_pool {gpu_id} train_python"),
+                "expected_gpus": _positive_int(gpu["expected_gpus"], f"gpu_pool {gpu_id} expected_gpus"),
+            }
+
+            if transport == "ssh":
+                validated_gpu["ssh"] = _ssh_spec(gpu.get("ssh"), f"gpu_pool {gpu_id} ssh")
+            elif transport == "http_pull":
+                validated_gpu["ssh"] = None
+                if "pull_url" not in gpu:
+                    raise DeploymentError(f"gpu_pool {gpu_id} with http_pull transport requires pull_url")
+                validated_gpu["pull_url"] = _plain_origin(gpu["pull_url"],
+                                                         f"gpu_pool {gpu_id} pull_url",
+                                                         allow_loopback=False)
+
+            if "environment_file" in gpu and gpu["environment_file"] is not None:
+                validated_gpu["environment_file"] = _absolute_path(gpu["environment_file"],
+                                                                  f"gpu_pool {gpu_id} environment_file")
+            else:
+                validated_gpu["environment_file"] = None
+
+            validated_pool.append(validated_gpu)
+
+        max_concurrent_runs = config.get("max_concurrent_runs", 4)
+        if type(max_concurrent_runs) is not int or max_concurrent_runs < 1:
+            raise DeploymentError("manager.max_concurrent_runs must be a positive integer")
+
+        run_queue_size = config.get("run_queue_size", 100)
+        if type(run_queue_size) is not int or run_queue_size < 1:
+            raise DeploymentError("manager.run_queue_size must be a positive integer")
+
+        hub_pull_interval = config.get("hub_pull_interval", 5)
+        if type(hub_pull_interval) not in (int, float) or hub_pull_interval <= 0:
+            raise DeploymentError("manager.hub_pull_interval must be a positive number")
+
+        # Store hub fields to add to manager dict later
+        hub_fields = {
+            "hub_port": hub_port,
+            "hub_url": hub_url,
+            "gpu_pool": validated_pool,
+            "max_concurrent_runs": max_concurrent_runs,
+            "run_queue_size": run_queue_size,
+            "hub_pull_interval": hub_pull_interval,
+        }
+
     manager = {
         "id": _slug(config["id"], "manager.id"), "mode": mode,
         "bind": _nonempty_str(config["bind"], "manager.bind"),
@@ -327,6 +412,8 @@ def _manager(config):
         manager["gateway_hosts"] = list(gateway_hosts)
         if shard_python is not None:
             manager["shard_python"] = shard_python
+    if mode == "hub":
+        manager.update(hub_fields)
     return manager
 
 
@@ -391,7 +478,7 @@ def _gpu_target(config):
         if ssh is not None:
             ssh = _ssh_spec(ssh, "gpu_target.ssh")
     elif ssh is not None:
-        raise DeploymentError("gpu_target.ssh must be null for local transport")
+        raise DeploymentError("gpu_target.ssh must be null for local or http_pull transport")
     target = {
         "id": _slug(config["id"], "gpu_target.id"), "transport": transport, "ssh": ssh,
         "source_dir": _absolute_path(config["source_dir"], "gpu_target.source_dir"),
@@ -429,7 +516,7 @@ def _rollout(config):
     # ssh_docker needs explicit machines; the embedded provider falls back to
     # the training config's worker list, so it may start empty.
     if (not isinstance(workers, list)
-            or (not workers and config["provider"] not in ("embedded", "sandbox"))):
+            or (not workers and config["provider"] not in ("embedded", "sandbox", "hub_pull"))):
         raise DeploymentError("rollout.workers must be a nonempty list")
     normalized, seen = [], set()
     for worker in workers:

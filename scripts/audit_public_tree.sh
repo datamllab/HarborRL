@@ -20,6 +20,7 @@ public_documents = {
     "configs/harbor_hub/public_compatibility_summary_zh.md",
     "docs/agents/environment-check.md", "docs/configuration-wizard.md",
     "docs/deployment.md", "docs/math-distill.md", "docs/sandbox-rollout.md",
+    "docs/rollout-runtime-lifecycle.md",
     "docs/train-inference-consistency.md", "docs/web-console.md",
     "practices/h_cluster/README.md", "harborrl/webui/static/lucide-LICENSE.txt",
 }
@@ -99,6 +100,15 @@ for path in files:
         for match in pattern.finditer(data):
             value = match.group(0)
             if b"127.0.0.1" in value or b"localhost" in value:
+                continue
+            # Docker's documented host alias is public configuration.
+            if label == "internal DNS" and value == b"host.docker.internal":
+                continue
+            # The optional GPU pod bootstrap provisions the root SSH service;
+            # this fixed container system directory is not a personal checkout.
+            if (label == "personal path" and value == b"/root" + b"/"
+                    and path.as_posix() == "practices/h_cluster/src/harborrl_h_cluster/rjob.py"
+                    and re.match(rb"\.ssh(?:/authorized_keys)?(?=\s)", data[match.end():])):
                 continue
             raise SystemExit(f"{path} contains {label}: {value.decode(errors='replace')}")
 

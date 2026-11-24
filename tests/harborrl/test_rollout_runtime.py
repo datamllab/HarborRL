@@ -337,3 +337,35 @@ def test_native_generate_shim_reexports_the_core():
                  "tokenizer_fingerprint", "GroupSlots"):
         assert getattr(native_generate, name) is getattr(runtime, name), name
     assert package.native_generate.__doc__ is not None
+
+
+@pytest.mark.parametrize('terminal', ['protocol', 'cleanup'])
+def test_group_terminal_sibling_failure_vetoes_generation_rerun(tmp_path, monkeypatch, terminal):
+    from harborrl.rollout import runtime as rollout_runtime
+    from harborrl.rollout.harbor_job.reliability import (
+        CleanupUnresolved,
+        RetryableRolloutFailure,
+    )
+
+    started = asyncio.Event()
+    async def slot(config, runtime_, slots, index, entry, reward):
+        if index == 0:
+            await started.wait()
+            raise RetryableRolloutFailure('infrastructure exhausted')
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            if terminal == 'cleanup':
+                runtime_.sandbox_admission.blocked = True
+                raise CleanupUnresolved('independent cleanup failed') from None
+            raise ValueError('task lock mismatch discovered during cleanup') from None
+
+    monkeypatch.setattr(rollout_runtime, '_run_slot', slot)
+    monkeypatch.setattr(rollout_runtime, '_group_slots', lambda *args: (object(), None))
+    runtime_ = SimpleNamespace(sandbox_admission=SimpleNamespace(blocked=False))
+    error = CleanupUnresolved if terminal == 'cleanup' else ValueError
+    with pytest.raises(error):
+        asyncio.run(rollout_runtime.run_group(
+            SimpleNamespace(group_size=2), runtime_, entry={}, group_index=0,
+            rollout_id=0, sampling_digest='s', policy_version='1'))

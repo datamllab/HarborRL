@@ -2,7 +2,7 @@
 
 Usually launched on another machine that shares the run directory:
 
-    RUN_ID=... RUN_DIR=/mnt/shared-storage-user/.../runs/Run-... \\
+    RUN_ID=... RUN_DIR=/shared/harborrl/runs/Run-... \\
     HARBORRL_SHARD_NAME=gw1 \\
     HARBORRL_SHARD_GATEWAY_HOST=0.0.0.0 HARBORRL_SHARD_GATEWAY_PORT=49300 \\
     HARBORRL_SHARD_GATEWAY_URL=http://10.98.250.180:49300 \\

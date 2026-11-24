@@ -7,6 +7,10 @@
 </p>
 
 <p align="center">
+  <a href="https://datamllab.github.io/HarborRL/"><img src="https://img.shields.io/badge/Documentation-526CFE?logo=materialformkdocs&amp;logoColor=white" alt="Documentation"></a>
+</p>
+
+<p align="center">
   <strong>A lightweight agentic reinforcement learning framework for everyone</strong>
 </p>
 
@@ -25,13 +29,16 @@
 
 ## News
 
+- **2026-11-24** Enabled [Hub training](docs/deployment.md#hub-training-with-remote-workers) with Docker and OpenSandbox workers.
+- **2026-11-24** Improved [rollout recovery and cleanup](docs/sandbox-rollout.md), with checkpoint retention and resume support.
+- **2026-11-12** Updated the [documentation](https://datamllab.github.io/HarborRL/) with installation, configuration, training and deployment guides, tutorials, and API references.
 - **2026-11-12** Added elastic gateway scaling with static routing, remote-first auto-growth and automatic retirement.
 - **2026-11-12** Added Hub deployment mode for one-way-firewall clusters: nodes pull tasks over HTTP, no cross-machine SSH required.
 - **2026-11-12** Unified multiple training algorithms on the shared Slime pipeline, validated on mathematical reasoning tasks.
 - **2026-11-12** Improved the configuration wizard, web console and sandbox rollout with audited cleanup.
 - **2026-10-26** Added an [offline configuration wizard](docs/configuration-wizard.md) and a [local Web console](docs/web-console.md) for configuration, validation, dry-runs, training launch, and logs.
 - **2026-10-26** Added [controller/GPU deployment configuration](docs/deployment.md), optional [OpenSandbox execution](docs/sandbox-rollout.md), and opt-in [train/inference consistency checks](docs/train-inference-consistency.md).
-- **10/2026** 📣📣📣 HarborRL released
+- **2026-10-12** 📣📣📣 HarborRL released
 
 ## About
 
